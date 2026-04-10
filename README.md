@@ -42,10 +42,11 @@ cd /Volumes/DataCenter_01/boox-tauri
 ## Tray dashboard highlights
 
 - Per-card manual refresh buttons (Auth / User / Storage / Metrics / Queue)
-- Configurable auto-refresh interval (`3s/5s/10s/30s/60s`)
+- Configurable auto-refresh interval (arbitrary minutes)
 - Upload real-time progress (`percent / speed / ETA / transferred bytes`)
 - Queue row actions: `推送` and `删除`
 - Queue delete is optimized for fast UI response (optimistic update + cache snapshot)
+- Same-LAN BOOX detection in user card (clickable device buttons)
 
 ## In-app menu
 
@@ -68,6 +69,6 @@ Default bundle target is `app` (configured for internal gray release).
 
 - Workflow: `.github/workflows/release-macos.yml`
 - Trigger: push to `main` or manual dispatch
-- Artifact: macOS `.dmg`
+- Artifact: macOS `.dmg` + Windows `.msi`
 - Release tag format: `build-YYYY-MM-DD` (timezone `Asia/Shanghai`)
 - If multiple builds happen in one day, workflow force-moves the same date tag and updates the same GitHub Release.

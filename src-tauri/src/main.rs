@@ -9,10 +9,13 @@ use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE};
 use serde_json::{json, Value};
 use sha1::Sha1;
 use std::{
+    collections::HashMap,
     fmt::Display,
     fs::{self, File},
     io::Read,
+    net::{IpAddr, Ipv4Addr, UdpSocket},
     path::{Path, PathBuf},
+    process::Command,
     sync::Mutex,
     thread,
     time::{Duration, Instant},
@@ -390,10 +393,13 @@ struct DashboardDevice {
     id: Option<String>,
     model: Option<String>,
     mac_address: Option<String>,
+    ip_address: Option<String>,
     login_status: Option<String>,
     latest_login_time: Option<String>,
     latest_logout_time: Option<String>,
     locked: Option<bool>,
+    same_lan: bool,
+    lan_ip: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2705,6 +2711,99 @@ fn value_to_array(value: Value) -> Vec<Value> {
     Vec::new()
 }
 
+fn parse_ipv4_from_text(text: &str) -> Option<Ipv4Addr> {
+    for token in text.split(|ch: char| !(ch.is_ascii_digit() || ch == '.')) {
+        if token.is_empty() {
+            continue;
+        }
+        if let Ok(ip) = token.parse::<Ipv4Addr>() {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+fn normalize_mac_address(text: &str) -> Option<String> {
+    let hex: String = text.chars().filter(|ch| ch.is_ascii_hexdigit()).collect();
+    if hex.len() != 12 {
+        return None;
+    }
+    let lower = hex.to_ascii_lowercase();
+    let mut out = String::with_capacity(17);
+    for (idx, ch) in lower.chars().enumerate() {
+        if idx > 0 && idx % 2 == 0 {
+            out.push(':');
+        }
+        out.push(ch);
+    }
+    Some(out)
+}
+
+fn collect_arp_neighbors() -> HashMap<String, String> {
+    let output = match Command::new("arp").arg("-an").output() {
+        Ok(output) if output.status.success() => output,
+        _ => return HashMap::new(),
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut neighbors = HashMap::new();
+    for line in text.lines() {
+        let Some(open_idx) = line.find('(') else {
+            continue;
+        };
+        let after_open = &line[(open_idx + 1)..];
+        let Some(close_rel) = after_open.find(')') else {
+            continue;
+        };
+        let ip_raw = &after_open[..close_rel];
+        let Some(ip) = parse_ipv4_from_text(ip_raw).map(|value| value.to_string()) else {
+            continue;
+        };
+
+        let Some(at_idx) = line.find(" at ") else {
+            continue;
+        };
+        let after_at = &line[(at_idx + 4)..];
+        let mac_token = after_at.split_whitespace().next().unwrap_or_default();
+        let Some(mac) = normalize_mac_address(mac_token) else {
+            continue;
+        };
+        neighbors.insert(mac, ip);
+    }
+    neighbors
+}
+
+fn detect_local_ipv4() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    match addr.ip() {
+        IpAddr::V4(ipv4) => Some(ipv4),
+        IpAddr::V6(_) => None,
+    }
+}
+
+fn in_same_lan_c24(local: Ipv4Addr, other: Ipv4Addr) -> bool {
+    let a = local.octets();
+    let b = other.octets();
+    a[0] == b[0] && a[1] == b[1] && a[2] == b[2]
+}
+
+fn extract_device_ip(item: &Value) -> Option<String> {
+    [
+        "ipAddress",
+        "ip",
+        "localIp",
+        "localIP",
+        "lanIp",
+        "deviceIp",
+        "lastIp",
+        "latestIp",
+    ]
+    .iter()
+    .find_map(|key| json_field_to_string(item, key))
+}
+
 fn current_upload_snapshot(app: &tauri::AppHandle) -> DashboardUploadState {
     let state = get_upload_runtime_state(app);
     DashboardUploadState {
@@ -2778,20 +2877,43 @@ fn build_dashboard_snapshot(app: &tauri::AppHandle) -> DashboardSnapshot {
         "https://send2boox.com/api/1/users/getDevice",
     )
     .unwrap_or(Value::Null);
+    let local_ipv4 = detect_local_ipv4();
+    let arp_neighbors = collect_arp_neighbors();
     let devices = value_to_array(devices_value)
         .into_iter()
-        .map(|item| DashboardDevice {
-            id: json_field_to_string(&item, "id")
-                .or_else(|| json_field_to_string(&item, "_id"))
-                .or_else(|| json_field_to_string(&item, "deviceId")),
-            model: json_field_to_string(&item, "model")
-                .or_else(|| json_field_to_string(&item, "deviceModel")),
-            mac_address: json_field_to_string(&item, "macAddress")
-                .or_else(|| json_field_to_string(&item, "mac")),
-            login_status: json_field_to_string(&item, "loginStatus"),
-            latest_login_time: json_field_to_string(&item, "latestLoginTime"),
-            latest_logout_time: json_field_to_string(&item, "latestLogoutTime"),
-            locked: json_field_to_bool(&item, "lock"),
+        .map(|item| {
+            let mac_address = json_field_to_string(&item, "macAddress")
+                .or_else(|| json_field_to_string(&item, "mac"));
+            let normalized_mac = mac_address
+                .as_deref()
+                .and_then(normalize_mac_address);
+            let lan_ip = normalized_mac
+                .as_ref()
+                .and_then(|mac| arp_neighbors.get(mac).cloned());
+            let ip_address = extract_device_ip(&item);
+            let same_lan_by_ip = match (
+                local_ipv4,
+                ip_address.as_deref().and_then(parse_ipv4_from_text),
+            ) {
+                (Some(local), Some(remote)) => in_same_lan_c24(local, remote),
+                _ => false,
+            };
+
+            DashboardDevice {
+                id: json_field_to_string(&item, "id")
+                    .or_else(|| json_field_to_string(&item, "_id"))
+                    .or_else(|| json_field_to_string(&item, "deviceId")),
+                model: json_field_to_string(&item, "model")
+                    .or_else(|| json_field_to_string(&item, "deviceModel")),
+                mac_address,
+                ip_address,
+                login_status: json_field_to_string(&item, "loginStatus"),
+                latest_login_time: json_field_to_string(&item, "latestLoginTime"),
+                latest_logout_time: json_field_to_string(&item, "latestLogoutTime"),
+                locked: json_field_to_bool(&item, "lock"),
+                same_lan: lan_ip.is_some() || same_lan_by_ip,
+                lan_ip,
+            }
         })
         .collect::<Vec<_>>();
 

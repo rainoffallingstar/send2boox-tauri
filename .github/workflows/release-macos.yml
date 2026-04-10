@@ -1,4 +1,4 @@
-name: Release macOS DMG
+name: Release Desktop Builds
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build-macos:
     runs-on: macos-latest
 
     steps:
@@ -22,19 +22,18 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
+        run: cargo install tauri-cli --version "^1.6" --locked
 
       - name: Build DMG (macOS)
         run: |
           cd src-tauri
           ~/.cargo/bin/cargo-tauri build --bundles dmg
 
-      - name: Prepare Artifact Metadata
+      - name: Prepare macOS Artifact Metadata
         id: meta
         shell: bash
         run: |
           set -euo pipefail
-          TAG="build-$(TZ=Asia/Shanghai date +'%Y-%m-%d')"
           DMG_PATH="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' | head -n 1)"
           if [[ -z "$DMG_PATH" ]]; then
             echo "DMG artifact not found" >&2
@@ -42,15 +41,102 @@ jobs:
           fi
           SHA_FILE="${DMG_PATH}.sha256"
           shasum -a 256 "$DMG_PATH" > "$SHA_FILE"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "dmg_path=$DMG_PATH" >> "$GITHUB_OUTPUT"
           echo "sha_file=$SHA_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: |
+            ${{ steps.meta.outputs.dmg_path }}
+            ${{ steps.meta.outputs.sha_file }}
+          if-no-files-found: error
+          retention-days: 14
+
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^1.6" --locked
+
+      - name: Build MSI (Windows)
+        shell: pwsh
+        run: |
+          Set-Location src-tauri
+          & "$env:USERPROFILE\.cargo\bin\cargo-tauri.exe" build --bundles msi
+
+      - name: Prepare Windows Artifact Metadata
+        id: meta
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "src-tauri/target/release/bundle/msi/*.msi" | Select-Object -First 1
+          if (-not $msi) {
+            Write-Error "MSI artifact not found"
+            exit 1
+          }
+          $shaFile = "$($msi.FullName).sha256"
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $msi.FullName).Hash.ToLower()
+          "$hash  $($msi.Name)" | Out-File -FilePath $shaFile -Encoding ascii
+          "msi_path=$($msi.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "sha_file=$shaFile" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: |
+            ${{ steps.meta.outputs.msi_path }}
+            ${{ steps.meta.outputs.sha_file }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs:
+      - build-macos
+      - build-windows
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download macOS Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-macos
+          path: release-assets/macos
+
+      - name: Download Windows Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-windows
+          path: release-assets/windows
+
+      - name: Prepare Release Tag
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="build-$(TZ=Asia/Shanghai date +'%Y-%m-%d')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Move Daily Tag To Current Commit
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ steps.meta.outputs.tag }}"
+          TAG="${{ steps.release_meta.outputs.tag }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -f "$TAG" "$GITHUB_SHA"
@@ -59,16 +145,18 @@ jobs:
       - name: Publish / Update Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: Send2Boox macOS ${{ steps.meta.outputs.tag }}
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          name: Send2Boox Desktop ${{ steps.release_meta.outputs.tag }}
           body: |
-            Automated macOS DMG build.
+            Automated desktop build.
 
             - Tag is date-based in Asia/Shanghai timezone.
             - Multiple builds in one day reuse and update the same tag/release.
+            - Includes macOS DMG and Windows MSI artifacts.
           files: |
-            ${{ steps.meta.outputs.dmg_path }}
-            ${{ steps.meta.outputs.sha_file }}
+            release-assets/**/*.dmg
+            release-assets/**/*.msi
+            release-assets/**/*.sha256
           draft: false
           prerelease: false
           allow_updates: true

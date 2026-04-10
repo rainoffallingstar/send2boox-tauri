@@ -22,15 +22,18 @@
             </div>
           </div>
           <div class="header-actions">
-            <label class="refresh-setting">
+            <label class="refresh-setting" for="refresh-interval-minutes">
               <span>刷新</span>
-              <select id="refresh-interval">
-                <option value="3000">3s</option>
-                <option value="5000" selected>5s</option>
-                <option value="10000">10s</option>
-                <option value="30000">30s</option>
-                <option value="60000">60s</option>
-              </select>
+              <input
+                id="refresh-interval-minutes"
+                type="number"
+                min="0.1"
+                step="0.1"
+                inputmode="decimal"
+                value="1"
+              />
+              <span>分钟</span>
+              <button id="refresh-apply-btn" class="btn btn-ghost btn-xs" type="button">应用</button>
             </label>
             <button id="open-main-btn" class="btn btn-ghost">打开主界面</button>
             <button id="refresh-btn" class="btn btn-ghost">刷新</button>
@@ -58,6 +61,7 @@
           </div>
           <p id="profile-name" class="main-value">-</p>
           <p id="device-summary" class="muted">设备信息加载中...</p>
+          <div id="lan-device-list" class="lan-device-list"></div>
         </section>
 
         <section class="card card-storage">

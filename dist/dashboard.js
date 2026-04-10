@@ -53,7 +53,7 @@ const state = {
   pendingForce: false,
   authTimer: null,
   authTimerTicks: 0,
-  refreshMs: 5000
+  refreshMs: 60000
 };
 
 function invokeWithTimeout(command, args = {}, timeoutMs = 12000) {
@@ -172,26 +172,75 @@ async function refreshCard(cardEl) {
   }
 }
 
-function normalizeRefreshMs(value) {
+function normalizeRefreshMinutes(value) {
   const n = Number(value);
-  const allowed = [3000, 5000, 10000, 30000, 60000];
-  return allowed.includes(n) ? n : 5000;
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return Math.min(1440, n);
 }
 
-function applyRefreshInterval(ms) {
-  state.refreshMs = normalizeRefreshMs(ms);
-  localStorage.setItem("s2b_refresh_interval_ms", String(state.refreshMs));
-  const select = document.getElementById("refresh-interval");
-  if (select) {
-    select.value = String(state.refreshMs);
+function formatRefreshMinutes(minutes) {
+  const rounded = Math.round(minutes * 10) / 10;
+  if (Number.isInteger(rounded)) return String(rounded);
+  return String(rounded.toFixed(1));
+}
+
+function applyRefreshIntervalMinutes(minutesInput) {
+  const minutes = normalizeRefreshMinutes(minutesInput);
+  state.refreshMs = Math.max(1000, Math.round(minutes * 60 * 1000));
+  localStorage.setItem("s2b_refresh_interval_minutes", formatRefreshMinutes(minutes));
+  const input = document.getElementById("refresh-interval-minutes");
+  if (input) {
+    input.value = formatRefreshMinutes(minutes);
   }
   startAutoRefresh();
+}
+
+function getInitialRefreshMinutes() {
+  const minutes = localStorage.getItem("s2b_refresh_interval_minutes");
+  if (minutes != null) return normalizeRefreshMinutes(minutes);
+  const legacyMs = Number(localStorage.getItem("s2b_refresh_interval_ms"));
+  if (Number.isFinite(legacyMs) && legacyMs > 0) {
+    return normalizeRefreshMinutes(legacyMs / 60000);
+  }
+  return 1;
 }
 
 function removePushItemLocally(id) {
   if (!state.snapshot?.push_queue) return;
   state.snapshot.push_queue = state.snapshot.push_queue.filter((item) => item.id !== id);
   renderPushList(state.snapshot.push_queue);
+}
+
+function renderLanDeviceButtons(devices) {
+  const host = document.getElementById("lan-device-list");
+  if (!host) return;
+  host.innerHTML = "";
+
+  const sameLanDevices = (devices || []).filter((item) => !!item?.same_lan);
+  if (sameLanDevices.length === 0) {
+    const empty = document.createElement("button");
+    empty.type = "button";
+    empty.className = "lan-device-btn empty";
+    empty.disabled = true;
+    empty.textContent = "未发现同局域网 BOOX 设备";
+    host.appendChild(empty);
+    return;
+  }
+
+  sameLanDevices.forEach((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "lan-device-btn";
+    const model = item.model || "BOOX 设备";
+    const ip = item.lan_ip || item.ip_address || "";
+    button.textContent = ip ? `${model} · ${ip}` : model;
+    button.dataset.model = model;
+    button.dataset.deviceId = item.id || "";
+    button.dataset.mac = item.mac_address || "";
+    button.dataset.ip = ip;
+    button.dataset.status = item.login_status || "";
+    host.appendChild(button);
+  });
 }
 
 function renderPushList(items) {
@@ -249,10 +298,14 @@ function renderSnapshot(snapshot) {
 
   setText("profile-uid", profile.uid ? `uid: ${profile.uid}` : "");
   setText("profile-name", profile.nickname || "未获取到用户名");
+  const sameLanCount = devices.filter((item) => !!item?.same_lan).length;
   setText(
     "device-summary",
-    devices.length ? `设备数: ${devices.length}` : "未获取到设备信息"
+    devices.length
+      ? `设备数: ${devices.length} · 同局域网: ${sameLanCount}`
+      : "未获取到设备信息"
   );
+  renderLanDeviceButtons(devices);
 
   const used = storage.used;
   const limit = storage.limit;
@@ -350,10 +403,25 @@ function bindActions() {
     await loadSnapshot(true);
   });
 
-  document.getElementById("refresh-interval")?.addEventListener("change", (event) => {
+  document.getElementById("refresh-apply-btn")?.addEventListener("click", () => {
+    const input = document.getElementById("refresh-interval-minutes");
+    if (!(input instanceof HTMLInputElement)) return;
+    applyRefreshIntervalMinutes(input.value);
+  });
+
+  document
+    .getElementById("refresh-interval-minutes")
+    ?.addEventListener("keydown", (event) => {
+      if (!(event instanceof KeyboardEvent) || event.key !== "Enter") return;
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement)) return;
+      applyRefreshIntervalMinutes(input.value);
+    });
+
+  document.getElementById("refresh-interval-minutes")?.addEventListener("blur", (event) => {
     const target = event.target;
-    if (!(target instanceof HTMLSelectElement)) return;
-    applyRefreshInterval(target.value);
+    if (!(target instanceof HTMLInputElement)) return;
+    applyRefreshIntervalMinutes(target.value);
   });
 
   document.getElementById("login-btn")?.addEventListener("click", async () => {
@@ -416,6 +484,20 @@ function bindActions() {
       }
     }
   });
+
+  document.getElementById("lan-device-list")?.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLButtonElement)) return;
+    if (target.disabled) return;
+    const model = target.dataset.model || "BOOX 设备";
+    const status = target.dataset.status || "-";
+    const ip = target.dataset.ip || "-";
+    const mac = target.dataset.mac || "-";
+    const deviceId = target.dataset.deviceId || "-";
+    window.alert(
+      `设备: ${model}\n状态: ${status}\n局域网IP: ${ip}\nMAC: ${mac}\n设备ID: ${deviceId}`
+    );
+  });
 }
 
 function startAutoRefresh() {
@@ -432,7 +514,7 @@ function startAutoRefresh() {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
-  applyRefreshInterval(localStorage.getItem("s2b_refresh_interval_ms") || 5000);
+  applyRefreshIntervalMinutes(getInitialRefreshMinutes());
   bindActions();
   setTimeout(() => loadSnapshot(true), 120);
   window.addEventListener("focus", () => loadSnapshot(true));
