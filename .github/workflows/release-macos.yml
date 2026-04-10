@@ -1,0 +1,77 @@
+name: Release macOS DMG
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+
+      - name: Build DMG (macOS)
+        run: |
+          cd src-tauri
+          ~/.cargo/bin/cargo-tauri build --bundles dmg
+
+      - name: Prepare Artifact Metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="build-$(TZ=Asia/Shanghai date +'%Y-%m-%d')"
+          DMG_PATH="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' | head -n 1)"
+          if [[ -z "$DMG_PATH" ]]; then
+            echo "DMG artifact not found" >&2
+            exit 1
+          fi
+          SHA_FILE="${DMG_PATH}.sha256"
+          shasum -a 256 "$DMG_PATH" > "$SHA_FILE"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "dmg_path=$DMG_PATH" >> "$GITHUB_OUTPUT"
+          echo "sha_file=$SHA_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Move Daily Tag To Current Commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG" --force
+
+      - name: Publish / Update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Send2Boox macOS ${{ steps.meta.outputs.tag }}
+          body: |
+            Automated macOS DMG build.
+
+            - Tag is date-based in Asia/Shanghai timezone.
+            - Multiple builds in one day reuse and update the same tag/release.
+          files: |
+            ${{ steps.meta.outputs.dmg_path }}
+            ${{ steps.meta.outputs.sha_file }}
+          draft: false
+          prerelease: false
+          allow_updates: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

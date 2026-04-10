@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Rust / Tauri build outputs
+target/
+src-tauri/target/
+
+# Cargo / rust backup
+**/*.rs.bk
+
+# Optional JS deps
+node_modules/
+
+# Misc
+*.tmp
+*.temp

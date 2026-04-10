@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Send2Boox Tray Dashboard</title>
+    <link rel="stylesheet" href="./dashboard.css" />
+  </head>
+  <body>
+    <div class="window-shell">
+      <div class="window-grip"></div>
+      <div class="bg-orb orb-a"></div>
+      <div class="bg-orb orb-b"></div>
+      <main class="panel">
+        <header class="panel-header">
+          <div class="title-wrap">
+            <p class="eyebrow">Send2Boox Desktop</p>
+            <h1>Send2Boox 控制中心</h1>
+            <div class="status-row">
+              <span id="auth-chip" class="chip chip-pending">初始化中</span>
+              <span id="sync-time" class="sync-time">刚刚</span>
+            </div>
+          </div>
+          <div class="header-actions">
+            <button id="open-main-btn" class="btn btn-ghost">打开主界面</button>
+            <button id="refresh-btn" class="btn btn-ghost">刷新</button>
+          </div>
+        </header>
+
+        <section class="card card-auth" id="auth-card">
+          <div class="card-title-row">
+            <h2>授权状态</h2>
+            <button id="login-btn" class="btn btn-primary">登录并授权</button>
+          </div>
+          <p id="auth-status" class="muted">初始化中...</p>
+        </section>
+
+        <section class="card card-user">
+          <div class="card-title-row">
+            <h2>用户与设备</h2>
+            <span id="profile-uid" class="muted"></span>
+          </div>
+          <p id="profile-name" class="main-value">-</p>
+          <p id="device-summary" class="muted">设备信息加载中...</p>
+        </section>
+
+        <section class="card card-storage">
+          <div class="card-title-row">
+            <h2>容量</h2>
+            <span id="storage-text" class="muted">-</span>
+          </div>
+          <div class="progress-track">
+            <div id="storage-bar" class="progress-bar"></div>
+          </div>
+        </section>
+
+        <section class="card card-metrics">
+          <div class="card-title-row">
+            <h2>阅读指标</h2>
+            <span class="muted">今日 / 本周</span>
+          </div>
+          <div class="metrics-grid">
+            <div class="metric">
+              <p class="metric-label">今日阅读数</p>
+              <p id="metric-today-read" class="metric-value">-</p>
+            </div>
+            <div class="metric">
+              <p class="metric-label">本周时长</p>
+              <p id="metric-week-time" class="metric-value">-</p>
+            </div>
+            <div class="metric">
+              <p class="metric-label">累计阅读</p>
+              <p id="metric-total-read" class="metric-value">-</p>
+            </div>
+            <div class="metric">
+              <p class="metric-label">累计完成</p>
+              <p id="metric-total-finished" class="metric-value">-</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="card card-queue">
+          <div class="card-title-row">
+            <h2>互动文件列表</h2>
+            <button id="upload-btn" class="btn btn-primary">上传文件</button>
+          </div>
+          <p id="upload-status" class="muted">上传进度: 空闲</p>
+          <div class="upload-progress-wrap">
+            <div class="progress-track upload-track">
+              <div id="upload-progress-bar" class="progress-bar upload-progress-bar"></div>
+            </div>
+            <p id="upload-metrics" class="muted">0.0% · -/s · 剩余 -</p>
+          </div>
+          <ul id="push-list" class="push-list"></ul>
+        </section>
+      </main>
+    </div>
+    <script src="./dashboard.js"></script>
+  </body>
+</html>
