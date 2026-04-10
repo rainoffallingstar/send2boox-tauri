@@ -4,13 +4,15 @@ This desktop client wraps Send2Boox with:
 
 - Main page: `https://send2boox.com/#/note/recentNote`
 - Upload page: `https://send2boox.com/#/push/file`
+- Tray dashboard window (left-click tray icon toggles show/hide)
 - Single main window that can switch between recent notes/upload page
-- System tray menu to open either page
-- Tray double-click opens the upload page directly
+- System tray menu for login/main/upload/diagnostics/stats/autostart/quit
+- Left click does **not** open tray menu (dashboard only)
 - Close-to-tray behavior (window close hides app instead of quitting)
 - Auto start on login (enabled by default on first run, can be toggled in tray)
 - Navigation allowlist: only `https://send2boox.com` and `https://www.send2boox.com`
 - Internal-release checks script for quick regression validation
+- GitHub Actions macOS DMG auto release (date-based tag, same-day rebuilds reuse one tag)
 
 ## Run
 
@@ -37,6 +39,14 @@ cd /Volumes/DataCenter_01/boox-tauri
 - `开机自启动: 开/关`: toggle auto start on login
 - `退出`: quit the app
 
+## Tray dashboard highlights
+
+- Per-card manual refresh buttons (Auth / User / Storage / Metrics / Queue)
+- Configurable auto-refresh interval (`3s/5s/10s/30s/60s`)
+- Upload real-time progress (`percent / speed / ETA / transferred bytes`)
+- Queue row actions: `推送` and `删除`
+- Queue delete is optimized for fast UI response (optimistic update + cache snapshot)
+
 ## In-app menu
 
 - `页面 -> 最近笔记`
@@ -53,3 +63,11 @@ cargo tauri build
 ```
 
 Default bundle target is `app` (configured for internal gray release).
+
+## GitHub Actions release
+
+- Workflow: `.github/workflows/release-macos.yml`
+- Trigger: push to `main` or manual dispatch
+- Artifact: macOS `.dmg`
+- Release tag format: `build-YYYY-MM-DD` (timezone `Asia/Shanghai`)
+- If multiple builds happen in one day, workflow force-moves the same date tag and updates the same GitHub Release.

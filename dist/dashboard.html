@@ -22,6 +22,16 @@
             </div>
           </div>
           <div class="header-actions">
+            <label class="refresh-setting">
+              <span>刷新</span>
+              <select id="refresh-interval">
+                <option value="3000">3s</option>
+                <option value="5000" selected>5s</option>
+                <option value="10000">10s</option>
+                <option value="30000">30s</option>
+                <option value="60000">60s</option>
+              </select>
+            </label>
             <button id="open-main-btn" class="btn btn-ghost">打开主界面</button>
             <button id="refresh-btn" class="btn btn-ghost">刷新</button>
           </div>
@@ -30,7 +40,10 @@
         <section class="card card-auth" id="auth-card">
           <div class="card-title-row">
             <h2>授权状态</h2>
-            <button id="login-btn" class="btn btn-primary">登录并授权</button>
+            <div class="card-actions">
+              <button class="card-refresh" data-card-refresh="auth" title="刷新授权状态">↻</button>
+              <button id="login-btn" class="btn btn-primary">登录并授权</button>
+            </div>
           </div>
           <p id="auth-status" class="muted">初始化中...</p>
         </section>
@@ -38,7 +51,10 @@
         <section class="card card-user">
           <div class="card-title-row">
             <h2>用户与设备</h2>
-            <span id="profile-uid" class="muted"></span>
+            <div class="card-actions">
+              <span id="profile-uid" class="muted"></span>
+              <button class="card-refresh" data-card-refresh="user" title="刷新用户与设备">↻</button>
+            </div>
           </div>
           <p id="profile-name" class="main-value">-</p>
           <p id="device-summary" class="muted">设备信息加载中...</p>
@@ -47,7 +63,10 @@
         <section class="card card-storage">
           <div class="card-title-row">
             <h2>容量</h2>
-            <span id="storage-text" class="muted">-</span>
+            <div class="card-actions">
+              <span id="storage-text" class="muted">-</span>
+              <button class="card-refresh" data-card-refresh="storage" title="刷新容量">↻</button>
+            </div>
           </div>
           <div class="progress-track">
             <div id="storage-bar" class="progress-bar"></div>
@@ -57,7 +76,10 @@
         <section class="card card-metrics">
           <div class="card-title-row">
             <h2>阅读指标</h2>
-            <span class="muted">今日 / 本周</span>
+            <div class="card-actions">
+              <span class="muted">今日 / 本周</span>
+              <button class="card-refresh" data-card-refresh="metrics" title="刷新阅读指标">↻</button>
+            </div>
           </div>
           <div class="metrics-grid">
             <div class="metric">
@@ -82,7 +104,10 @@
         <section class="card card-queue">
           <div class="card-title-row">
             <h2>互动文件列表</h2>
-            <button id="upload-btn" class="btn btn-primary">上传文件</button>
+            <div class="card-actions">
+              <button class="card-refresh" data-card-refresh="queue" title="刷新互动文件列表">↻</button>
+              <button id="upload-btn" class="btn btn-primary">上传文件</button>
+            </div>
           </div>
           <p id="upload-status" class="muted">上传进度: 空闲</p>
           <div class="upload-progress-wrap">

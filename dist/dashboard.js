@@ -47,11 +47,13 @@ const invoke = createInvoke();
 
 const state = {
   timer: null,
+  syncTimer: null,
   snapshot: null,
   loading: false,
   pendingForce: false,
   authTimer: null,
-  authTimerTicks: 0
+  authTimerTicks: 0,
+  refreshMs: 5000
 };
 
 function invokeWithTimeout(command, args = {}, timeoutMs = 12000) {
@@ -155,6 +157,41 @@ function computeWeekTotalTime(readTimeWeek) {
 function setText(id, value) {
   const el = document.getElementById(id);
   if (el) el.textContent = value;
+}
+
+async function refreshCard(cardEl) {
+  if (!cardEl) {
+    await loadSnapshot(true);
+    return;
+  }
+  cardEl.classList.add("is-refreshing");
+  try {
+    await loadSnapshot(true);
+  } finally {
+    setTimeout(() => cardEl.classList.remove("is-refreshing"), 200);
+  }
+}
+
+function normalizeRefreshMs(value) {
+  const n = Number(value);
+  const allowed = [3000, 5000, 10000, 30000, 60000];
+  return allowed.includes(n) ? n : 5000;
+}
+
+function applyRefreshInterval(ms) {
+  state.refreshMs = normalizeRefreshMs(ms);
+  localStorage.setItem("s2b_refresh_interval_ms", String(state.refreshMs));
+  const select = document.getElementById("refresh-interval");
+  if (select) {
+    select.value = String(state.refreshMs);
+  }
+  startAutoRefresh();
+}
+
+function removePushItemLocally(id) {
+  if (!state.snapshot?.push_queue) return;
+  state.snapshot.push_queue = state.snapshot.push_queue.filter((item) => item.id !== id);
+  renderPushList(state.snapshot.push_queue);
 }
 
 function renderPushList(items) {
@@ -291,12 +328,32 @@ async function loadSnapshot(force = false) {
 }
 
 function bindActions() {
+  document.querySelectorAll("[data-card-refresh]").forEach((btn) => {
+    btn.addEventListener("click", async (event) => {
+      const target = event.currentTarget;
+      if (!(target instanceof HTMLElement)) return;
+      const card = target.closest(".card");
+      target.setAttribute("disabled", "true");
+      try {
+        await refreshCard(card);
+      } finally {
+        target.removeAttribute("disabled");
+      }
+    });
+  });
+
   document.getElementById("open-main-btn")?.addEventListener("click", async () => {
     await invokeWithTimeout("dashboard_open_main", { page: "recent" }, 6000);
   });
 
   document.getElementById("refresh-btn")?.addEventListener("click", async () => {
     await loadSnapshot(true);
+  });
+
+  document.getElementById("refresh-interval")?.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement)) return;
+    applyRefreshInterval(target.value);
   });
 
   document.getElementById("login-btn")?.addEventListener("click", async () => {
@@ -342,14 +399,21 @@ function bindActions() {
       } else if (action === "delete") {
         const ok = window.confirm("确定删除这条推送记录吗？");
         if (!ok) return;
-        const snapshot = await invokeWithTimeout("dashboard_push_delete", { id }, 15000);
+        removePushItemLocally(id);
+        setText("upload-status", "删除中...");
+        const snapshot = await invokeWithTimeout("dashboard_push_delete", { id }, 12000);
         if (snapshot) renderSnapshot(snapshot);
       }
     } catch (err) {
       setText("upload-status", `操作失败: ${String(err)}`);
+      if (action === "delete") {
+        setTimeout(() => loadSnapshot(true), 120);
+      }
     } finally {
       target.removeAttribute("disabled");
-      setTimeout(() => loadSnapshot(true), 300);
+      if (action === "resend") {
+        setTimeout(() => loadSnapshot(false), 400);
+      }
     }
   });
 }
@@ -358,8 +422,9 @@ function startAutoRefresh() {
   if (state.timer) clearInterval(state.timer);
   state.timer = setInterval(() => {
     loadSnapshot(false);
-  }, 5000);
-  setInterval(() => {
+  }, state.refreshMs);
+  if (state.syncTimer) clearInterval(state.syncTimer);
+  state.syncTimer = setInterval(() => {
     if (state.snapshot?.fetched_at_ms) {
       setText("sync-time", `更新于 ${timeAgoText(state.snapshot.fetched_at_ms)}`);
     }
@@ -367,14 +432,18 @@ function startAutoRefresh() {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
+  applyRefreshInterval(localStorage.getItem("s2b_refresh_interval_ms") || 5000);
   bindActions();
-  startAutoRefresh();
   setTimeout(() => loadSnapshot(true), 120);
   window.addEventListener("focus", () => loadSnapshot(true));
   window.addEventListener("beforeunload", () => {
     if (state.timer) {
       clearInterval(state.timer);
       state.timer = null;
+    }
+    if (state.syncTimer) {
+      clearInterval(state.syncTimer);
+      state.syncTimer = null;
     }
   });
 });

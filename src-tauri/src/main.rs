@@ -340,12 +340,20 @@ async fn dashboard_push_delete(
     id: String,
 ) -> Result<DashboardSnapshot, String> {
     let app_for_task = app.clone();
-    let snapshot = tauri::async_runtime::spawn_blocking(move || {
-        dashboard_push_delete_inner(&app_for_task, &id)?;
-        Ok::<DashboardSnapshot, String>(build_dashboard_snapshot(&app_for_task))
-    })
+    let id_for_task = id.clone();
+    tauri::async_runtime::spawn_blocking(move || dashboard_push_delete_inner(&app_for_task, &id_for_task))
     .await
     .map_err(|err| err.to_string())??;
+
+    if let Some(snapshot) = update_dashboard_cache_after_delete(&app, &id) {
+        return Ok(snapshot);
+    }
+
+    let app_for_refresh = app.clone();
+    let snapshot =
+        tauri::async_runtime::spawn_blocking(move || build_dashboard_snapshot(&app_for_refresh))
+            .await
+            .map_err(|err| err.to_string())?;
     set_dashboard_cache(&app, snapshot.clone());
     Ok(snapshot)
 }
@@ -1034,6 +1042,27 @@ fn set_dashboard_cache(app: &tauri::AppHandle, snapshot: DashboardSnapshot) {
     }
 }
 
+fn update_dashboard_cache_after_delete(
+    app: &tauri::AppHandle,
+    deleted_id: &str,
+) -> Option<DashboardSnapshot> {
+    match app.state::<RuntimeState>().dashboard_cache.lock() {
+        Ok(mut cache) => {
+            let Some(snapshot) = cache.as_mut() else {
+                return None;
+            };
+            snapshot.push_queue.retain(|item| item.id != deleted_id);
+            snapshot.upload = current_upload_snapshot(app);
+            snapshot.fetched_at_ms = unix_ms_now();
+            Some(snapshot.clone())
+        }
+        Err(err) => {
+            eprintln!("[send2boox][warn] 更新仪表盘缓存失败: {err}");
+            None
+        }
+    }
+}
+
 fn set_cached_auth_state(app: &tauri::AppHandle, state: CachedAuthState) {
     let is_authorized = has_auth_state(&state);
     let mut changed = false;
@@ -1605,8 +1634,20 @@ fn browser_fetch_push_queue_via_pouchdb(
         const all = await db.allDocs({{ include_docs: true, descending: true, limit: 200 }});
         docs = (all.rows || []).map((row) => row.doc).filter(Boolean);
       }}
+      const looksLikePushDoc = (doc) => {{
+        if (!doc) return false;
+        if (doc.msgType === 2 && doc.contentType === 'digital_content') return true;
+        let content = doc.content;
+        if (typeof content === 'string') {{
+          try {{ content = JSON.parse(content); }} catch (_) {{}}
+        }}
+        const formats = Array.isArray(content && content.formats) ? content.formats : [];
+        const hasStorage = !!(content && content.storage && formats.length > 0);
+        const hasName = !!(doc.name || (content && (content.name || content.title)));
+        return hasStorage || hasName;
+      }};
       docs = docs
-        .filter((doc) => doc && doc.msgType === 2 && doc.contentType === 'digital_content')
+        .filter((doc) => looksLikePushDoc(doc))
         .sort((a, b) => toNumber(b.updatedAt || b.createdAt) - toNumber(a.updatedAt || a.createdAt))
         .slice(0, limit);
 
@@ -3610,7 +3651,7 @@ fn main() {
     let page_recent = CustomMenuItem::new("page_recent", "最近笔记");
     let page_upload = CustomMenuItem::new("page_upload", "上传文件");
 
-    let tray = SystemTray::new().with_menu(
+    let tray = SystemTray::new().with_menu_on_left_click(false).with_menu(
         SystemTrayMenu::new()
             .add_item(open_login)
             .add_item(open_main)

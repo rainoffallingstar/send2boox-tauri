@@ -108,6 +108,28 @@ h2 {
 .header-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
+}
+
+.refresh-setting {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 6px;
+}
+
+.refresh-setting select {
+  border: 1px solid #ccd1da;
+  border-radius: 6px;
+  background: #fff;
+  color: #2f3a4a;
+  font-size: 11px;
+  padding: 2px 4px;
 }
 
 .status-row {
@@ -174,6 +196,38 @@ h2 {
   justify-content: space-between;
   align-items: center;
   gap: 10px;
+}
+
+.card-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.card-refresh {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid #c9d2df;
+  background: #ffffff;
+  color: #46566f;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform 0.12s ease, filter 0.15s ease;
+}
+
+.card-refresh:hover {
+  filter: brightness(1.05);
+}
+
+.card-refresh:active {
+  transform: scale(0.95);
+}
+
+.card.is-refreshing {
+  border-color: #9db7d8;
+  box-shadow: 0 0 0 1px rgba(10, 132, 255, 0.18), var(--card-shadow);
 }
 
 .main-value {
