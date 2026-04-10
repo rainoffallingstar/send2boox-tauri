@@ -3760,6 +3760,18 @@ fn toggle_auto_launch(app: &tauri::AppHandle) {
     sync_autostart_menu_title(app);
 }
 
+#[cfg(target_os = "macos")]
+fn build_system_tray(menu: SystemTrayMenu) -> SystemTray {
+    SystemTray::new()
+        .with_menu_on_left_click(false)
+        .with_menu(menu)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn build_system_tray(menu: SystemTrayMenu) -> SystemTray {
+    SystemTray::new().with_menu(menu)
+}
+
 fn main() {
     let open_login = CustomMenuItem::new("open_login", "登录并授权");
     let open_main = CustomMenuItem::new("open_main", "打开主页面");
@@ -3773,22 +3785,21 @@ fn main() {
     let page_recent = CustomMenuItem::new("page_recent", "最近笔记");
     let page_upload = CustomMenuItem::new("page_upload", "上传文件");
 
-    let tray = SystemTray::new().with_menu_on_left_click(false).with_menu(
-        SystemTrayMenu::new()
-            .add_item(open_login)
-            .add_item(open_main)
-            .add_item(open_upload)
-            .add_item(upload_diag)
-            .add_native_item(SystemTrayMenuItem::Separator)
-            .add_item(upload_progress)
-            .add_native_item(SystemTrayMenuItem::Separator)
-            .add_item(calendar_stats)
-            .add_item(refresh_calendar_item)
-            .add_native_item(SystemTrayMenuItem::Separator)
-            .add_item(toggle_autostart)
-            .add_native_item(SystemTrayMenuItem::Separator)
-            .add_item(quit),
-    );
+    let tray_menu = SystemTrayMenu::new()
+        .add_item(open_login)
+        .add_item(open_main)
+        .add_item(open_upload)
+        .add_item(upload_diag)
+        .add_native_item(SystemTrayMenuItem::Separator)
+        .add_item(upload_progress)
+        .add_native_item(SystemTrayMenuItem::Separator)
+        .add_item(calendar_stats)
+        .add_item(refresh_calendar_item)
+        .add_native_item(SystemTrayMenuItem::Separator)
+        .add_item(toggle_autostart)
+        .add_native_item(SystemTrayMenuItem::Separator)
+        .add_item(quit);
+    let tray = build_system_tray(tray_menu);
 
     let app_menu = Menu::new().add_submenu(Submenu::new(
         "页面",
