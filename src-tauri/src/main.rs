@@ -68,6 +68,45 @@ const AUTH_CACHE_FILE: &str = "auth_cache.json";
 #[cfg(target_os = "windows")]
 const WINDOWS_MAIN_WINDOW_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0";
+const SYNC_COOKIE_CAPTURE_SCRIPT: &str = r#"
+(() => {
+  (async () => {
+    try {
+      const res = await fetch('https://send2boox.com/api/1/users/syncToken', {
+        method: 'GET',
+        credentials: 'include',
+        headers: { 'Accept': 'application/json, text/plain, */*' }
+      });
+      const text = await res.text();
+      const payload = JSON.parse(text);
+      const data = payload && payload.result_code === 0 ? payload.data : null;
+      if (!data || !data.session_id) return;
+
+      const sid = String(data.session_id || '').trim();
+      const name = String(data.cookie_name || 'SyncGatewaySession').trim() || 'SyncGatewaySession';
+      if (!sid) return;
+
+      const host = (window.location && window.location.hostname) ? window.location.hostname : 'send2boox.com';
+      const domains = Array.from(new Set([
+        host,
+        'send2boox.com',
+        '.send2boox.com'
+      ]));
+      const names = Array.from(new Set([name, 'SyncGatewaySession']));
+      const paths = ['/', '/neocloud'];
+
+      for (const cookieName of names) {
+        for (const path of paths) {
+          try { document.cookie = `${cookieName}=${sid}; path=${path}`; } catch (_) {}
+          for (const domain of domains) {
+            try { document.cookie = `${cookieName}=${sid}; domain=${domain}; path=${path}`; } catch (_) {}
+          }
+        }
+      }
+    } catch (_) {}
+  })();
+})();
+"#;
 const AUTH_TOKEN_CAPTURE_SCRIPT: &str = r#"
 (() => {
   try {
@@ -1340,6 +1379,14 @@ fn refresh_cached_auth_token(app: &tauri::AppHandle) {
     }
 }
 
+fn refresh_sync_cookie_in_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_window(MAIN_LABEL) {
+        if let Err(err) = window.eval(SYNC_COOKIE_CAPTURE_SCRIPT) {
+            log_error("执行同步 cookie 捕获脚本失败", &err);
+        }
+    }
+}
+
 fn bootstrap_auth_from_main_window(app: &tauri::AppHandle, timeout_ms: u64) {
     if has_auth_state(&get_cached_auth_state(app)) {
         return;
@@ -1357,6 +1404,7 @@ fn start_main_auth_sync_poller(app: &tauri::AppHandle) {
             continue;
         }
         refresh_cached_auth_token(&app_handle);
+        refresh_sync_cookie_in_window(&app_handle);
     });
 }
 
@@ -4694,6 +4742,7 @@ fn main() {
                     set_cached_auth_state(&window.app_handle(), state);
                 }
                 refresh_cached_auth_token(&window.app_handle());
+                refresh_sync_cookie_in_window(&window.app_handle());
                 if let Ok(mut cache) = window
                     .app_handle()
                     .state::<RuntimeState>()
