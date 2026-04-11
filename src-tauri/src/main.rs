@@ -169,6 +169,7 @@ struct RuntimeState {
     cached_auth_state: Mutex<CachedAuthState>,
     upload_runtime_state: Mutex<UploadRuntimeState>,
     login_authorizing: Mutex<bool>,
+    allow_main_window_close: Mutex<bool>,
     last_tray_anchor: Mutex<Option<(f64, f64, f64, f64)>>,
     dashboard_cache: Mutex<Option<DashboardSnapshot>>,
 }
@@ -564,6 +565,61 @@ fn allow_hidden_main_window_bootstrap() -> bool {
 #[cfg(not(target_os = "windows"))]
 fn allow_hidden_main_window_bootstrap() -> bool {
     true
+}
+
+fn set_allow_main_window_close(app: &tauri::AppHandle, value: bool) {
+    match app.state::<RuntimeState>().allow_main_window_close.lock() {
+        Ok(mut flag) => {
+            *flag = value;
+        }
+        Err(err) => eprintln!("[send2boox][warn] 更新主窗口关闭开关失败: {err}"),
+    }
+}
+
+fn can_close_main_window(app: &tauri::AppHandle) -> bool {
+    match app.state::<RuntimeState>().allow_main_window_close.lock() {
+        Ok(flag) => *flag,
+        Err(err) => {
+            eprintln!("[send2boox][warn] 读取主窗口关闭开关失败: {err}");
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn should_rebuild_main_window(page: AppPage, visible: bool) -> bool {
+    visible || matches!(page, AppPage::Login)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn should_rebuild_main_window(_page: AppPage, _visible: bool) -> bool {
+    false
+}
+
+fn close_main_window_for_rebuild(app: &tauri::AppHandle) -> bool {
+    let Some(window) = app.get_window(MAIN_LABEL) else {
+        return true;
+    };
+
+    set_allow_main_window_close(app, true);
+    let close_result = window.close();
+    if let Err(err) = close_result {
+        set_allow_main_window_close(app, false);
+        log_error("关闭旧主窗口失败", &err);
+        return false;
+    }
+
+    for _ in 0..30 {
+        if app.get_window(MAIN_LABEL).is_none() {
+            set_allow_main_window_close(app, false);
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    set_allow_main_window_close(app, false);
+    eprintln!("[send2boox][warn] 等待旧主窗口关闭超时，将继续尝试复用旧窗口");
+    false
 }
 
 fn tray_action_from_id(id: &str) -> TrayAction {
@@ -4124,6 +4180,10 @@ fn run_native_upload_task(app: tauri::AppHandle, files: Vec<PathBuf>) {
 }
 
 fn ensure_main_window(app: &tauri::AppHandle, page: AppPage, visible: bool) -> Option<Window> {
+    if should_rebuild_main_window(page, visible) && app.get_window(MAIN_LABEL).is_some() {
+        let _ = close_main_window_for_rebuild(app);
+    }
+
     if let Some(window) = app.get_window(MAIN_LABEL) {
         if let Err(err) = window.eval(&redirect_script(page.url())) {
             report_error(app, "切换页面失败", &err);
@@ -4706,6 +4766,11 @@ fn main() {
         })
         .on_window_event(|event| {
             if let WindowEvent::CloseRequested { api, .. } = event.event() {
+                if event.window().label() == MAIN_LABEL
+                    && can_close_main_window(&event.window().app_handle())
+                {
+                    return;
+                }
                 api.prevent_close();
                 if let Err(err) = event.window().hide() {
                     log_error("隐藏窗口失败", &err);
