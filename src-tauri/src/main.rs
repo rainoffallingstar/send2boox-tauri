@@ -13,7 +13,7 @@ use std::{
     fmt::Display,
     fs::{self, File},
     io::Read,
-    net::{IpAddr, Ipv4Addr, UdpSocket},
+    net::{IpAddr, Ipv4Addr, SocketAddrV4, UdpSocket},
     path::{Path, PathBuf},
     process::Command,
     sync::Mutex,
@@ -50,6 +50,7 @@ const CALENDAR_LABEL: &str = "calendar_stats";
 const CALENDAR_STATS_TITLE_PREFIX: &str = "S2B_CAL_STATS::";
 const CALENDAR_STATS_QUERY_KEY: &str = "trayStats";
 const UPLOAD_DIAG_ID: &str = "upload_diag";
+const LAN_DIAG_ID: &str = "lan_diag";
 const AUTH_TITLE_PREFIX: &str = "S2B_AUTH_STATE::";
 const BROWSER_FETCH_PREFIX: &str = "S2B_FETCH_RESULT::";
 const AUTH_STATE_QUERY_KEY: &str = "trayAuth";
@@ -247,6 +248,7 @@ enum TrayAction {
     OpenMain,
     OpenUpload,
     UploadDiag,
+    LanDiag,
     RefreshCalendarStats,
     ToggleAutostart,
     Quit,
@@ -526,6 +528,7 @@ fn tray_action_from_id(id: &str) -> TrayAction {
         "open_main" => TrayAction::OpenMain,
         "open_upload" => TrayAction::OpenUpload,
         UPLOAD_DIAG_ID => TrayAction::UploadDiag,
+        LAN_DIAG_ID => TrayAction::LanDiag,
         REFRESH_CALENDAR_ID => TrayAction::RefreshCalendarStats,
         TOGGLE_AUTOSTART_ID => TrayAction::ToggleAutostart,
         "quit" => TrayAction::Quit,
@@ -2773,6 +2776,31 @@ fn collect_arp_neighbors() -> HashMap<String, String> {
     neighbors
 }
 
+fn has_any_mac_match(neighbors: &HashMap<String, String>, target_macs: &[String]) -> bool {
+    target_macs
+        .iter()
+        .filter_map(|value| normalize_mac_address(value))
+        .any(|mac| neighbors.contains_key(&mac))
+}
+
+fn warmup_arp_by_udp_sweep(local: Ipv4Addr) {
+    let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
+        return;
+    };
+    let local_octets = local.octets();
+    for host in 1u8..=254u8 {
+        if host == local_octets[3] {
+            continue;
+        }
+        let target = SocketAddrV4::new(
+            Ipv4Addr::new(local_octets[0], local_octets[1], local_octets[2], host),
+            9,
+        );
+        let _ = socket.send_to(&[0x53], target);
+    }
+    thread::sleep(Duration::from_millis(400));
+}
+
 fn detect_local_ipv4() -> Option<Ipv4Addr> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("8.8.8.8:80").ok()?;
@@ -2877,9 +2905,22 @@ fn build_dashboard_snapshot(app: &tauri::AppHandle) -> DashboardSnapshot {
         "https://send2boox.com/api/1/users/getDevice",
     )
     .unwrap_or(Value::Null);
+    let device_items = value_to_array(devices_value);
+    let target_macs = device_items
+        .iter()
+        .filter_map(|item| {
+            json_field_to_string(item, "macAddress").or_else(|| json_field_to_string(item, "mac"))
+        })
+        .collect::<Vec<_>>();
     let local_ipv4 = detect_local_ipv4();
-    let arp_neighbors = collect_arp_neighbors();
-    let devices = value_to_array(devices_value)
+    let mut arp_neighbors = collect_arp_neighbors();
+    if let Some(local_ip) = local_ipv4 {
+        if !target_macs.is_empty() && !has_any_mac_match(&arp_neighbors, &target_macs) {
+            warmup_arp_by_udp_sweep(local_ip);
+            arp_neighbors = collect_arp_neighbors();
+        }
+    }
+    let devices = device_items
         .into_iter()
         .map(|item| {
             let mac_address = json_field_to_string(&item, "macAddress")
@@ -3076,6 +3117,129 @@ fn run_upload_diagnostics(app: tauri::AppHandle) {
         };
 
         let body = format!("上传诊断结果\n\n{auth_msg}\n{bucket_msg}\n{sts_msg}\n{sts_auth_msg}");
+        message(None::<&tauri::Window>, APP_ALERT_TITLE, body);
+    });
+}
+
+fn run_lan_diagnostics(app: tauri::AppHandle) {
+    let _ = ensure_main_window(&app, AppPage::Recent, false);
+    refresh_cached_auth_token(&app);
+    thread::spawn(move || {
+        let local_ipv4 = detect_local_ipv4();
+        let arp_before = collect_arp_neighbors();
+        let client = match Client::builder().timeout(Duration::from_secs(20)).build() {
+            Ok(client) => client,
+            Err(err) => {
+                report_error(&app, "创建网络客户端失败", &err);
+                return;
+            }
+        };
+
+        let auth = fetch_auth_context(&client, &app);
+        let mut lines = vec!["局域网诊断结果".to_string(), String::new()];
+        lines.push(format!(
+            "本机 IPv4: {}",
+            local_ipv4
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "未获取到".to_string())
+        ));
+        lines.push(format!("ARP 邻居(预热前): {}", arp_before.len()));
+
+        let mut neighbors = arp_before.clone();
+        let mut warmed = false;
+        match auth {
+            Ok(auth_ctx) => {
+                lines.push(format!("认证: 成功 (uid={})", auth_ctx.uid));
+                let devices_value = fetch_api_data_for_auth(
+                    &client,
+                    &app,
+                    &auth_ctx,
+                    "https://send2boox.com/api/1/users/getDevice",
+                );
+                match devices_value {
+                    Ok(value) => {
+                        let items = value_to_array(value);
+                        let target_macs = items
+                            .iter()
+                            .filter_map(|item| {
+                                json_field_to_string(item, "macAddress")
+                                    .or_else(|| json_field_to_string(item, "mac"))
+                            })
+                            .collect::<Vec<_>>();
+                        lines.push(format!("账号设备数: {}", items.len()));
+                        if let Some(local_ip) = local_ipv4 {
+                            if !target_macs.is_empty() && !has_any_mac_match(&neighbors, &target_macs)
+                            {
+                                warmup_arp_by_udp_sweep(local_ip);
+                                neighbors = collect_arp_neighbors();
+                                warmed = true;
+                            }
+                        }
+                        lines.push(format!(
+                            "ARP 邻居(预热后): {}{}",
+                            neighbors.len(),
+                            if warmed { " (已触发探测)" } else { "" }
+                        ));
+
+                        let mut hit_count = 0usize;
+                        let mut detail_rows = Vec::new();
+                        for (idx, item) in items.iter().enumerate() {
+                            let model = json_field_to_string(item, "model")
+                                .or_else(|| json_field_to_string(item, "deviceModel"))
+                                .unwrap_or_else(|| "BOOX设备".to_string());
+                            let mac = json_field_to_string(item, "macAddress")
+                                .or_else(|| json_field_to_string(item, "mac"));
+                            let normalized_mac =
+                                mac.as_deref().and_then(normalize_mac_address);
+                            let arp_ip = normalized_mac
+                                .as_ref()
+                                .and_then(|m| neighbors.get(m).cloned());
+                            let api_ip = extract_device_ip(item);
+                            let same_lan_by_ip = match (
+                                local_ipv4,
+                                api_ip.as_deref().and_then(parse_ipv4_from_text),
+                            ) {
+                                (Some(local), Some(remote)) => in_same_lan_c24(local, remote),
+                                _ => false,
+                            };
+                            let same_lan = arp_ip.is_some() || same_lan_by_ip;
+                            if same_lan {
+                                hit_count += 1;
+                            }
+                            detail_rows.push(format!(
+                                "{}. {} | MAC={} | API_IP={} | ARP_IP={} | 同局域网={}",
+                                idx + 1,
+                                model,
+                                mac.unwrap_or_else(|| "-".to_string()),
+                                api_ip.unwrap_or_else(|| "-".to_string()),
+                                arp_ip.unwrap_or_else(|| "-".to_string()),
+                                if same_lan { "是" } else { "否" }
+                            ));
+                        }
+                        lines.push(format!(
+                            "同局域网命中: {}/{}",
+                            hit_count,
+                            detail_rows.len()
+                        ));
+                        if detail_rows.is_empty() {
+                            lines.push("设备详情: 无".to_string());
+                        } else {
+                            lines.push("设备详情:".to_string());
+                            lines.extend(detail_rows.into_iter().take(20));
+                        }
+                    }
+                    Err(err) => {
+                        lines.push(format!("获取设备列表失败: {err}"));
+                    }
+                }
+            }
+            Err(err) => {
+                lines.push(format!("认证: 失败 ({err})"));
+                lines.push("无法获取账号设备列表，无法做 BOOX 局域网匹配".to_string());
+            }
+        }
+
+        let body = lines.join("\n");
         message(None::<&tauri::Window>, APP_ALERT_TITLE, body);
     });
 }
@@ -3777,6 +3941,7 @@ fn main() {
     let open_main = CustomMenuItem::new("open_main", "打开主页面");
     let open_upload = CustomMenuItem::new("open_upload", "托盘上传（静默）");
     let upload_diag = CustomMenuItem::new(UPLOAD_DIAG_ID, "上传诊断");
+    let lan_diag = CustomMenuItem::new(LAN_DIAG_ID, "局域网诊断");
     let upload_progress = CustomMenuItem::new(UPLOAD_PROGRESS_ID, "上传进度: 空闲");
     let calendar_stats = CustomMenuItem::new(CALENDAR_STATS_ID, "日历统计: 未加载");
     let refresh_calendar_item = CustomMenuItem::new(REFRESH_CALENDAR_ID, "刷新日历统计");
@@ -3790,6 +3955,7 @@ fn main() {
         .add_item(open_main)
         .add_item(open_upload)
         .add_item(upload_diag)
+        .add_item(lan_diag)
         .add_native_item(SystemTrayMenuItem::Separator)
         .add_item(upload_progress)
         .add_native_item(SystemTrayMenuItem::Separator)
@@ -3861,6 +4027,9 @@ fn main() {
                 }
                 TrayAction::UploadDiag => {
                     run_upload_diagnostics(app.app_handle());
+                }
+                TrayAction::LanDiag => {
+                    run_lan_diagnostics(app.app_handle());
                 }
                 TrayAction::RefreshCalendarStats => {
                     refresh_calendar_stats(&app.app_handle());
@@ -3972,6 +4141,7 @@ mod tests {
         assert_eq!(tray_action_from_id("open_main"), TrayAction::OpenMain);
         assert_eq!(tray_action_from_id("open_upload"), TrayAction::OpenUpload);
         assert_eq!(tray_action_from_id(UPLOAD_DIAG_ID), TrayAction::UploadDiag);
+        assert_eq!(tray_action_from_id(LAN_DIAG_ID), TrayAction::LanDiag);
         assert_eq!(
             tray_action_from_id(REFRESH_CALENDAR_ID),
             TrayAction::RefreshCalendarStats
