@@ -63,6 +63,93 @@ const DASHBOARD_PUSH_QUEUE_LIMIT: usize = 30;
 const DASHBOARD_CACHE_MAX_AGE_MS: u128 = 5_000;
 const SHARE_WS_WAIT_MS: u64 = 2_200;
 const AUTH_CACHE_FILE: &str = "auth_cache.json";
+#[cfg(target_os = "windows")]
+const WINDOWS_MAIN_WINDOW_INIT_SCRIPT: &str = r#"
+(() => {
+  try {
+    window.__S2B_DESKTOP__ = true;
+
+    try {
+      const sw = navigator.serviceWorker;
+      if (sw) {
+        try {
+          sw.register = () => Promise.resolve({
+            active: null,
+            installing: null,
+            waiting: null,
+            scope: window.location.origin,
+            unregister: () => Promise.resolve(true),
+            update: () => Promise.resolve()
+          });
+        } catch (_) {}
+
+        sw.getRegistrations()
+          .then((registrations) => Promise.all(registrations.map((item) => item.unregister().catch(() => false))))
+          .catch(() => {});
+      }
+    } catch (_) {}
+
+    try {
+      if ('caches' in window) {
+        caches.keys()
+          .then((keys) => Promise.all(keys.map((key) => caches.delete(key).catch(() => false))))
+          .catch(() => {});
+      }
+    } catch (_) {}
+
+    const routeKey = 's2b-desktop-reload:' + (window.location.pathname || '/') + '::' + ((window.location.hash || '#/').split('?')[0] || '#/');
+    const hasVisibleAppContent = () => {
+      const app = document.getElementById('app');
+      if (!app) return false;
+      if (app.childElementCount > 0) return true;
+      const text = (app.textContent || '').replace(/\s+/g, '');
+      return text.length > 0;
+    };
+
+    const startRecoveryWatch = () => {
+      let ticks = 0;
+      const timer = setInterval(() => {
+        if (document.hidden) return;
+        if (hasVisibleAppContent()) {
+          clearInterval(timer);
+          try { sessionStorage.removeItem(routeKey); } catch (_) {}
+          return;
+        }
+
+        ticks += 1;
+        if (ticks < 40) return;
+        clearInterval(timer);
+
+        let alreadyReloaded = false;
+        try {
+          alreadyReloaded = sessionStorage.getItem(routeKey) === '1';
+        } catch (_) {}
+        if (alreadyReloaded) return;
+
+        try {
+          sessionStorage.setItem(routeKey, '1');
+        } catch (_) {}
+
+        try {
+          const next = new URL(window.location.href);
+          next.searchParams.set('desktopReload', String(Date.now()));
+          window.location.replace(next.toString());
+        } catch (_) {
+          window.location.reload();
+        }
+      }, 250);
+
+      window.addEventListener('beforeunload', () => clearInterval(timer), { once: true });
+    };
+
+    if (document.readyState === 'loading') {
+      window.addEventListener('DOMContentLoaded', startRecoveryWatch, { once: true });
+    } else {
+      startRecoveryWatch();
+    }
+  } catch (_) {}
+})();
+"#;
 const AUTH_TOKEN_CAPTURE_SCRIPT: &str = r#"
 (() => {
   try {
@@ -538,6 +625,16 @@ fn redirect_script(url: &str) -> String {
         "if (window.location.href !== '{0}') window.location.replace('{0}');",
         safe_url
     )
+}
+
+#[cfg(target_os = "windows")]
+fn main_window_init_script() -> Option<&'static str> {
+    Some(WINDOWS_MAIN_WINDOW_INIT_SCRIPT)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn main_window_init_script() -> Option<&'static str> {
+    None
 }
 
 fn is_allowed_navigation(url: &str) -> bool {
@@ -4212,14 +4309,18 @@ fn ensure_main_window(app: &tauri::AppHandle, page: AppPage, visible: bool) -> O
         }
     };
 
-    match WindowBuilder::new(app, MAIN_LABEL, WindowUrl::External(parsed_url))
+    let mut builder = WindowBuilder::new(app, MAIN_LABEL, WindowUrl::External(parsed_url))
         .title(page.title())
         .inner_size(1280.0, 860.0)
         .resizable(true)
         .visible(visible)
-        .on_navigation(|url| is_allowed_navigation(url.as_str()))
-        .build()
-    {
+        .on_navigation(|url| is_allowed_navigation(url.as_str()));
+
+    if let Some(script) = main_window_init_script() {
+        builder = builder.initialization_script(script);
+    }
+
+    match builder.build() {
         Ok(window) => Some(window),
         Err(err) => {
             report_error(app, "创建主窗口失败", &err);
@@ -4808,6 +4909,15 @@ mod tests {
         let script = redirect_script(UPLOAD_URL);
         assert!(script.contains("window.location.replace"));
         assert!(script.contains(UPLOAD_URL));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn main_window_init_script_is_configured_for_windows_behavior() {
+        let script = WINDOWS_MAIN_WINDOW_INIT_SCRIPT;
+        assert!(script.contains("navigator.serviceWorker"));
+        assert!(script.contains("desktopReload"));
+        assert!(script.contains("s2b-desktop-reload"));
     }
 
     #[test]
