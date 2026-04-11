@@ -232,13 +232,21 @@ function renderLanDeviceButtons(devices) {
     button.type = "button";
     button.className = "lan-device-btn";
     const model = item.model || "BOOX 设备";
+    const transferHost = item.transfer_host || "";
     const ip = item.lan_ip || item.ip_address || "";
-    button.textContent = ip ? `${model} · ${ip}` : model;
+    const inferred =
+      item.same_lan_reason === "single_device_online_fallback" ||
+      item.same_lan_reason === "share_socket_single_fallback";
+    const hostText = transferHost ? transferHost.replace(/^https?:\/\//, "") : ip;
+    const titleText = hostText ? `${model} · ${hostText}` : model;
+    button.textContent = inferred ? `${titleText} · 推断` : titleText;
     button.dataset.model = model;
     button.dataset.deviceId = item.id || "";
     button.dataset.mac = item.mac_address || "";
     button.dataset.ip = ip;
+    button.dataset.host = transferHost;
     button.dataset.status = item.login_status || "";
+    button.dataset.reason = item.same_lan_reason || "";
     host.appendChild(button);
   });
 }
@@ -485,17 +493,39 @@ function bindActions() {
     }
   });
 
-  document.getElementById("lan-device-list")?.addEventListener("click", (event) => {
+  document.getElementById("lan-device-list")?.addEventListener("click", async (event) => {
     const target = event.target;
     if (!(target instanceof HTMLButtonElement)) return;
     if (target.disabled) return;
     const model = target.dataset.model || "BOOX 设备";
     const status = target.dataset.status || "-";
     const ip = target.dataset.ip || "-";
+    const host = target.dataset.host || "-";
     const mac = target.dataset.mac || "-";
     const deviceId = target.dataset.deviceId || "-";
+    const reasonRaw = target.dataset.reason || "-";
+    const reason =
+      reasonRaw === "share_socket_mac"
+        ? "Share WebSocket(MAC匹配)"
+        : reasonRaw === "share_socket_single_fallback"
+          ? "Share WebSocket(单设备回退)"
+          : reasonRaw === "single_device_online_fallback"
+        ? "单设备在线推断"
+        : reasonRaw === "mac_arp"
+          ? "MAC-ARP命中"
+          : reasonRaw === "same_subnet"
+            ? "同网段IP命中"
+            : reasonRaw;
+    if (host !== "-" && invoke) {
+      try {
+        await invokeWithTimeout("dashboard_open_transfer_host", { host }, 6000);
+        return;
+      } catch (err) {
+        setText("upload-status", `打开设备地址失败: ${String(err)}`);
+      }
+    }
     window.alert(
-      `设备: ${model}\n状态: ${status}\n局域网IP: ${ip}\nMAC: ${mac}\n设备ID: ${deviceId}`
+      `设备: ${model}\n状态: ${status}\n互传地址: ${host}\n局域网IP: ${ip}\nMAC: ${mac}\n设备ID: ${deviceId}\n识别来源: ${reason}`
     );
   });
 }

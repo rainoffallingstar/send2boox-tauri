@@ -9,7 +9,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE};
 use serde_json::{json, Value};
 use sha1::Sha1;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Display,
     fs::{self, File},
     io::Read,
@@ -33,7 +33,6 @@ const DASHBOARD_LABEL: &str = "tray_dashboard";
 const MAIN_URL: &str = "https://send2boox.com/#/note/recentNote";
 const UPLOAD_URL: &str = "https://send2boox.com/#/push/file";
 const LOGIN_URL: &str = "https://send2boox.com/#/login";
-const CALENDAR_URL: &str = "https://send2boox.com/#/calendar";
 const DASHBOARD_HTML: &str = "dashboard.html";
 const TOGGLE_AUTOSTART_ID: &str = "toggle_autostart";
 const CALENDAR_STATS_ID: &str = "calendar_stats_status";
@@ -57,11 +56,12 @@ const AUTH_STATE_QUERY_KEY: &str = "trayAuth";
 const FETCH_RESULT_QUERY_KEY: &str = "trayFetch";
 const MAX_SINGLE_UPLOAD_BYTES: u64 = 200 * 1024 * 1024;
 const DEFAULT_BUCKET_KEY: &str = "onyx-cloud";
-const DASHBOARD_WIDTH: f64 = 430.0;
-const DASHBOARD_HEIGHT: f64 = 820.0;
+const DASHBOARD_WIDTH: f64 = 750.0;
+const DASHBOARD_HEIGHT: f64 = 450.0;
 const DASHBOARD_GAP: f64 = -6.0;
 const DASHBOARD_PUSH_QUEUE_LIMIT: usize = 30;
 const DASHBOARD_CACHE_MAX_AGE_MS: u128 = 5_000;
+const SHARE_WS_WAIT_MS: u64 = 2_200;
 const AUTH_CACHE_FILE: &str = "auth_cache.json";
 const AUTH_TOKEN_CAPTURE_SCRIPT: &str = r#"
 (() => {
@@ -276,6 +276,7 @@ fn app_status(app: tauri::AppHandle) -> AppStatus {
 #[tauri::command]
 async fn dashboard_snapshot(app: tauri::AppHandle) -> Result<DashboardSnapshot, String> {
     if let Some(snapshot) = get_dashboard_cache(&app, DASHBOARD_CACHE_MAX_AGE_MS) {
+        sync_reading_metrics_menu_from_snapshot(&app, &snapshot);
         return Ok(snapshot);
     }
     let app_for_task = app.clone();
@@ -284,6 +285,7 @@ async fn dashboard_snapshot(app: tauri::AppHandle) -> Result<DashboardSnapshot, 
             .await
             .map_err(|err| err.to_string())?;
     set_dashboard_cache(&app, snapshot.clone());
+    sync_reading_metrics_menu_from_snapshot(&app, &snapshot);
     Ok(snapshot)
 }
 
@@ -295,6 +297,7 @@ async fn dashboard_refresh(app: tauri::AppHandle) -> Result<DashboardSnapshot, S
             .await
             .map_err(|err| err.to_string())?;
     set_dashboard_cache(&app, snapshot.clone());
+    sync_reading_metrics_menu_from_snapshot(&app, &snapshot);
     Ok(snapshot)
 }
 
@@ -324,6 +327,20 @@ fn dashboard_upload_pick_and_send(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn dashboard_open_transfer_host(host: String) -> Result<(), String> {
+    let normalized = normalize_transfer_host_url(&host)
+        .ok_or_else(|| "设备互传地址无效".to_string())?;
+    let parsed = tauri::Url::parse(&normalized).map_err(|err| err.to_string())?;
+    let host_name = parsed
+        .host_str()
+        .ok_or_else(|| "设备互传地址缺少主机名".to_string())?;
+    if !is_local_transfer_host(host_name) {
+        return Err("仅允许打开局域网 BOOX 设备地址".to_string());
+    }
+    open_external_url(&normalized)
+}
+
+#[tauri::command]
 async fn dashboard_push_resend(
     app: tauri::AppHandle,
     id: String,
@@ -336,6 +353,7 @@ async fn dashboard_push_resend(
     .await
     .map_err(|err| err.to_string())??;
     set_dashboard_cache(&app, snapshot.clone());
+    sync_reading_metrics_menu_from_snapshot(&app, &snapshot);
     Ok(snapshot)
 }
 
@@ -351,6 +369,7 @@ async fn dashboard_push_delete(
     .map_err(|err| err.to_string())??;
 
     if let Some(snapshot) = update_dashboard_cache_after_delete(&app, &id) {
+        sync_reading_metrics_menu_from_snapshot(&app, &snapshot);
         return Ok(snapshot);
     }
 
@@ -360,6 +379,7 @@ async fn dashboard_push_delete(
             .await
             .map_err(|err| err.to_string())?;
     set_dashboard_cache(&app, snapshot.clone());
+    sync_reading_metrics_menu_from_snapshot(&app, &snapshot);
     Ok(snapshot)
 }
 
@@ -402,6 +422,8 @@ struct DashboardDevice {
     locked: Option<bool>,
     same_lan: bool,
     lan_ip: Option<String>,
+    transfer_host: Option<String>,
+    same_lan_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -446,6 +468,14 @@ struct DashboardSnapshot {
     calendar_metrics: DashboardCalendarMetrics,
     upload: DashboardUploadState,
     fetched_at_ms: u128,
+}
+
+#[derive(Debug, Clone)]
+struct ShareTransferDevice {
+    model: Option<String>,
+    mac_address: Option<String>,
+    host: Option<String>,
+    status: Option<String>,
 }
 
 fn log_error(context: &str, err: &dyn Display) {
@@ -550,7 +580,7 @@ fn parse_calendar_stats_title(title: &str) -> Option<String> {
         .strip_prefix(CALENDAR_STATS_TITLE_PREFIX)
         .map(|raw| raw.trim())
         .filter(|value| !value.is_empty())
-        .map(|value| format!("日历统计: {value}"))
+        .map(|value| format!("阅读统计指标: {value}"))
 }
 
 fn parse_calendar_stats_from_url(url: &str) -> Option<String> {
@@ -558,7 +588,92 @@ fn parse_calendar_stats_from_url(url: &str) -> Option<String> {
     if value.trim().is_empty() {
         return None;
     }
-    Some(format!("日历统计: {value}"))
+    Some(format!("阅读统计指标: {value}"))
+}
+
+fn value_to_i64(value: &Value) -> Option<i64> {
+    if let Some(raw) = value.as_i64() {
+        return Some(raw);
+    }
+    if let Some(raw) = value.as_u64() {
+        return i64::try_from(raw).ok();
+    }
+    if let Some(raw) = value.as_f64() {
+        if raw.is_finite() {
+            return Some(raw.round() as i64);
+        }
+    }
+    value.as_str().and_then(|raw| raw.parse::<i64>().ok())
+}
+
+fn object_field_i64(value: &Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(value_to_i64)
+}
+
+fn reading_today_count(day_read_today: &Value) -> i64 {
+    if let Some(items) = day_read_today.as_array() {
+        return items.len() as i64;
+    }
+    if let Some(items) = day_read_today.get("list").and_then(Value::as_array) {
+        return items.len() as i64;
+    }
+    if let Some(items) = day_read_today.get("rows").and_then(Value::as_array) {
+        return items.len() as i64;
+    }
+    object_field_i64(day_read_today, "read")
+        .or_else(|| object_field_i64(day_read_today, "count"))
+        .or_else(|| object_field_i64(day_read_today, "total"))
+        .unwrap_or(0)
+}
+
+fn reading_week_total_ms(read_time_week: &Value) -> i64 {
+    if let Some(now) = read_time_week.get("now") {
+        if let Some(value) = object_field_i64(now, "totalTime") {
+            return value.max(0);
+        }
+    }
+    object_field_i64(read_time_week, "totalTime")
+        .or_else(|| object_field_i64(read_time_week, "weekTotalTime"))
+        .unwrap_or(0)
+        .max(0)
+}
+
+fn reading_total_count(reading_info: &Value) -> i64 {
+    object_field_i64(reading_info, "read").unwrap_or(0).max(0)
+}
+
+fn short_duration_text(ms: i64) -> String {
+    if ms <= 0 {
+        return "0m".to_string();
+    }
+    let seconds = ms / 1000;
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    if hours > 0 {
+        format!("{hours}h{minutes}m")
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+fn build_reading_metrics_label(snapshot: &DashboardSnapshot) -> String {
+    if !snapshot.auth.authorized {
+        return "阅读统计指标: 未授权".to_string();
+    }
+    let today = reading_today_count(&snapshot.calendar_metrics.day_read_today);
+    let week_ms = reading_week_total_ms(&snapshot.calendar_metrics.read_time_week);
+    let total = reading_total_count(&snapshot.calendar_metrics.reading_info);
+    format!(
+        "阅读统计指标: 今日{} 本周{} 累计{}",
+        today,
+        short_duration_text(week_ms),
+        total
+    )
+}
+
+fn sync_reading_metrics_menu_from_snapshot(app: &tauri::AppHandle, snapshot: &DashboardSnapshot) {
+    let text = build_reading_metrics_label(snapshot);
+    set_calendar_stats_label(app, &text);
 }
 
 fn get_hash_query_value(url: &str, key: &str) -> Option<String> {
@@ -596,7 +711,7 @@ fn set_calendar_stats_label(app: &tauri::AppHandle, text: &str) {
         .get_item(CALENDAR_STATS_ID)
         .set_title(value)
     {
-        log_error("更新日历统计托盘文案失败", &err);
+        log_error("更新阅读统计指标托盘文案失败", &err);
     }
 }
 
@@ -2776,6 +2891,75 @@ fn collect_arp_neighbors() -> HashMap<String, String> {
     neighbors
 }
 
+fn is_private_or_cgnat_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    if octets[0] == 10 {
+        return true;
+    }
+    if octets[0] == 172 && (16..=31).contains(&octets[1]) {
+        return true;
+    }
+    if octets[0] == 192 && octets[1] == 168 {
+        return true;
+    }
+    octets[0] == 100 && (64..=127).contains(&octets[1])
+}
+
+fn collect_local_ipv4_candidates() -> Vec<(String, Ipv4Addr)> {
+    let output = match Command::new("ifconfig").output() {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    let mut result = Vec::new();
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut current_iface = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !line.starts_with('\t') && line.contains(':') {
+            current_iface = line
+                .split(':')
+                .next()
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string();
+            continue;
+        }
+
+        if !trimmed.starts_with("inet ") {
+            continue;
+        }
+        let iface = current_iface.trim();
+        if iface.is_empty()
+            || iface.starts_with("lo")
+            || iface.starts_with("utun")
+            || iface.starts_with("awdl")
+            || iface.starts_with("llw")
+            || iface.starts_with("gif")
+            || iface.starts_with("stf")
+            || iface.starts_with("anpi")
+        {
+            continue;
+        }
+
+        let ip_token = trimmed.split_whitespace().nth(1).unwrap_or_default();
+        let Ok(ip) = ip_token.parse::<Ipv4Addr>() else {
+            continue;
+        };
+        if ip.is_loopback() || ip.is_link_local() {
+            continue;
+        }
+        if !is_private_or_cgnat_ipv4(ip) {
+            continue;
+        }
+        result.push((iface.to_string(), ip));
+    }
+
+    result.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.octets().cmp(&b.1.octets())));
+    result.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    result
+}
+
 fn has_any_mac_match(neighbors: &HashMap<String, String>, target_macs: &[String]) -> bool {
     target_macs
         .iter()
@@ -2783,20 +2967,22 @@ fn has_any_mac_match(neighbors: &HashMap<String, String>, target_macs: &[String]
         .any(|mac| neighbors.contains_key(&mac))
 }
 
-fn warmup_arp_by_udp_sweep(local: Ipv4Addr) {
+fn warmup_arp_by_udp_sweep(local_ips: &[Ipv4Addr]) {
     let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
         return;
     };
-    let local_octets = local.octets();
-    for host in 1u8..=254u8 {
-        if host == local_octets[3] {
-            continue;
+    for local in local_ips {
+        let local_octets = local.octets();
+        for host in 1u8..=254u8 {
+            if host == local_octets[3] {
+                continue;
+            }
+            let target = SocketAddrV4::new(
+                Ipv4Addr::new(local_octets[0], local_octets[1], local_octets[2], host),
+                9,
+            );
+            let _ = socket.send_to(&[0x53], target);
         }
-        let target = SocketAddrV4::new(
-            Ipv4Addr::new(local_octets[0], local_octets[1], local_octets[2], host),
-            9,
-        );
-        let _ = socket.send_to(&[0x53], target);
     }
     thread::sleep(Duration::from_millis(400));
 }
@@ -2830,6 +3016,269 @@ fn extract_device_ip(item: &Value) -> Option<String> {
     ]
     .iter()
     .find_map(|key| json_field_to_string(item, key))
+}
+
+fn normalize_transfer_host_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let parsed = tauri::Url::parse(&with_scheme).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    parsed.host_str()?;
+    Some(parsed.to_string())
+}
+
+fn extract_ipv4_from_transfer_host(host_url: &str) -> Option<String> {
+    let parsed = tauri::Url::parse(host_url).ok()?;
+    let host = parsed.host_str()?;
+    host.parse::<Ipv4Addr>().ok().map(|ip| ip.to_string())
+}
+
+fn is_local_transfer_host(host: &str) -> bool {
+    let lowered = host.trim().to_ascii_lowercase();
+    if lowered == "localhost" || lowered.ends_with(".local") {
+        return true;
+    }
+    match lowered.parse::<Ipv4Addr>() {
+        Ok(ip) => is_private_or_cgnat_ipv4(ip) || ip.is_loopback() || ip.is_link_local(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_external_url(url: &str) -> Result<(), String> {
+    let status = Command::new("open")
+        .arg(url)
+        .status()
+        .map_err(|err| err.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("打开失败，退出码: {:?}", status.code()))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_external_url(url: &str) -> Result<(), String> {
+    let status = Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .status()
+        .map_err(|err| err.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("打开失败，退出码: {:?}", status.code()))
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn open_external_url(url: &str) -> Result<(), String> {
+    let status = Command::new("xdg-open")
+        .arg(url)
+        .status()
+        .map_err(|err| err.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("打开失败，退出码: {:?}", status.code()))
+    }
+}
+
+fn browser_fetch_share_devices_via_websocket(
+    app: &tauri::AppHandle,
+    uid: &str,
+    timeout_ms: u64,
+) -> Result<Vec<ShareTransferDevice>, String> {
+    let window = app
+        .get_window(MAIN_LABEL)
+        .ok_or_else(|| "主页面未初始化，无法访问浏览器会话".to_string())?;
+    let request_id = Uuid::new_v4().to_string();
+    let ws_id = Uuid::new_v4().to_string();
+    let prefix = format!("{BROWSER_FETCH_PREFIX}{request_id}::");
+    let hash_prefix = format!("{request_id}::");
+    let script = format!(
+        r#"
+(() => {{
+  const reqPrefix = '{prefix}';
+  const hashPrefix = '{hash_prefix}';
+  const fetchKey = '{fetch_key}';
+  const uid = '{uid}';
+  const wsId = '{ws_id}';
+  const timeoutMs = {timeout_ms};
+  const toArray = (value) => Array.isArray(value) ? value : [];
+  const normalize = (entry) => {{
+    const host = entry && typeof entry.host === 'string' ? entry.host.trim() : '';
+    const mac = entry && typeof entry.mac === 'string' ? entry.mac.trim() : '';
+    const model = entry && typeof entry.model === 'string' ? entry.model.trim() : '';
+    const status = entry && typeof entry.status === 'string'
+      ? entry.status.trim()
+      : (entry && typeof entry.loginStatus === 'string' ? entry.loginStatus.trim() : '');
+    return {{ host, mac, model, status }};
+  }};
+  const dedupe = (items) => {{
+    const out = [];
+    const seen = new Set();
+    for (const raw of toArray(items)) {{
+      const item = normalize(raw);
+      const key = `${{item.mac}}|${{item.host}}|${{item.model}}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+    }}
+    return out;
+  }};
+  const pushResult = (payload) => {{
+    const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+    document.title = reqPrefix + encoded;
+    const hash = window.location.hash || '#/';
+    const [route, query = ''] = hash.split('?');
+    const params = new URLSearchParams(query);
+    params.set(fetchKey, hashPrefix + encoded);
+    const nextHash = route + '?' + params.toString();
+    if (window.location.hash !== nextHash) window.location.hash = nextHash;
+  }};
+
+  let done = false;
+  let ws = null;
+  let timer = null;
+  const finish = (payload) => {{
+    if (done) return;
+    done = true;
+    if (timer) clearTimeout(timer);
+    try {{
+      if (ws) ws.close();
+    }} catch (_) {{}}
+    pushResult(payload);
+  }};
+  const finishOk = (items) => finish({{ ok: true, items: dedupe(items) }});
+
+  try {{
+    const host = (window.location && window.location.host) ? window.location.host : 'send2boox.com';
+    const wsUrl = `wss://${{host}}/share/${{encodeURIComponent(uid)}}?type=client&id=${{encodeURIComponent(wsId)}}`;
+    ws = new WebSocket(wsUrl);
+    timer = setTimeout(() => finishOk([]), timeoutMs);
+    ws.onmessage = (event) => {{
+      let payload = null;
+      try {{
+        payload = JSON.parse(String(event.data || ''));
+      }} catch (_) {{
+        return;
+      }}
+      if (!payload || typeof payload !== 'object') return;
+      if (payload.action === 'serverInfo') {{
+        if (payload.message === 'yes') finishOk(payload.data || []);
+        else if (payload.message === 'no') finishOk([]);
+      }} else if (payload.action === 'serverStatus') {{
+        const list = payload.data && Array.isArray(payload.data.serverInfo)
+          ? payload.data.serverInfo
+          : [];
+        finishOk(list);
+      }}
+    }};
+    ws.onerror = () => finish({{ ok: false, error: 'share websocket error' }});
+  }} catch (err) {{
+    finish({{ ok: false, error: String(err) }});
+  }}
+}})();
+"#,
+        prefix = escape_js(&prefix),
+        hash_prefix = escape_js(&hash_prefix),
+        fetch_key = FETCH_RESULT_QUERY_KEY,
+        uid = escape_js(uid),
+        ws_id = escape_js(&ws_id),
+        timeout_ms = timeout_ms,
+    );
+
+    window
+        .eval(&script)
+        .map_err(|err| format!("执行 share websocket 查询失败: {err}"))?;
+
+    for _ in 0..120 {
+        thread::sleep(Duration::from_millis(100));
+        let current_url = window.url().to_string();
+        if let Some(hash_value) = get_hash_query_value(&current_url, FETCH_RESULT_QUERY_KEY) {
+            if let Some(encoded) = hash_value.strip_prefix(&hash_prefix) {
+                let raw = BASE64_STANDARD
+                    .decode(encoded.as_bytes())
+                    .map_err(|err| err.to_string())?;
+                let text = String::from_utf8(raw).map_err(|err| err.to_string())?;
+                let payload: Value = serde_json::from_str(&text).map_err(|err| err.to_string())?;
+                if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                    let err_text = payload
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    return Err(format!("share websocket 查询失败: {err_text}"));
+                }
+                let items = payload
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut out = Vec::new();
+                let mut seen = HashSet::new();
+                for item in items {
+                    let host = json_field_to_string(&item, "host")
+                        .and_then(|value| normalize_transfer_host_url(&value));
+                    let mac = json_field_to_string(&item, "mac")
+                        .or_else(|| json_field_to_string(&item, "macAddress"));
+                    let model = json_field_to_string(&item, "model");
+                    let status = json_field_to_string(&item, "status")
+                        .or_else(|| json_field_to_string(&item, "loginStatus"));
+                    let key = format!(
+                        "{}|{}|{}",
+                        mac.clone().unwrap_or_default(),
+                        host.clone().unwrap_or_default(),
+                        model.clone().unwrap_or_default()
+                    );
+                    if seen.contains(&key) {
+                        continue;
+                    }
+                    seen.insert(key);
+                    out.push(ShareTransferDevice {
+                        model,
+                        mac_address: mac,
+                        host,
+                        status,
+                    });
+                }
+                return Ok(out);
+            }
+        }
+    }
+
+    Err("share websocket 查询超时".to_string())
+}
+
+fn fetch_share_devices_for_dashboard(app: &tauri::AppHandle, uid: &str) -> Vec<ShareTransferDevice> {
+    if app.get_window(MAIN_LABEL).is_none() {
+        let _ = ensure_main_window(app, AppPage::Recent, false);
+        thread::sleep(Duration::from_millis(500));
+    }
+    match browser_fetch_share_devices_via_websocket(app, uid, SHARE_WS_WAIT_MS) {
+        Ok(items) => items,
+        Err(err) => {
+            eprintln!("[send2boox][warn] share 设备发现失败: {err}");
+            Vec::new()
+        }
+    }
+}
+
+fn is_online_status(status: Option<&str>) -> bool {
+    matches!(
+        status
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("online") | Some("on")
+    )
 }
 
 fn current_upload_snapshot(app: &tauri::AppHandle) -> DashboardUploadState {
@@ -2906,38 +3355,99 @@ fn build_dashboard_snapshot(app: &tauri::AppHandle) -> DashboardSnapshot {
     )
     .unwrap_or(Value::Null);
     let device_items = value_to_array(devices_value);
+    let device_total = device_items.len();
+    let share_devices = fetch_share_devices_for_dashboard(app, &auth.uid);
+    let mut share_by_mac = HashMap::new();
+    for item in &share_devices {
+        if let Some(mac) = item
+            .mac_address
+            .as_deref()
+            .and_then(normalize_mac_address)
+        {
+            share_by_mac.entry(mac).or_insert_with(|| item.clone());
+        }
+    }
+    let single_share_fallback = if share_devices.len() == 1 {
+        share_devices.first().cloned()
+    } else {
+        None
+    };
     let target_macs = device_items
         .iter()
         .filter_map(|item| {
             json_field_to_string(item, "macAddress").or_else(|| json_field_to_string(item, "mac"))
         })
         .collect::<Vec<_>>();
-    let local_ipv4 = detect_local_ipv4();
-    let mut arp_neighbors = collect_arp_neighbors();
-    if let Some(local_ip) = local_ipv4 {
-        if !target_macs.is_empty() && !has_any_mac_match(&arp_neighbors, &target_macs) {
-            warmup_arp_by_udp_sweep(local_ip);
-            arp_neighbors = collect_arp_neighbors();
+    let local_ipv4_candidates = collect_local_ipv4_candidates();
+    let local_probe_ips = {
+        let mut ips = local_ipv4_candidates
+            .iter()
+            .map(|(_, ip)| *ip)
+            .collect::<Vec<_>>();
+        if ips.is_empty() {
+            if let Some(fallback) = detect_local_ipv4() {
+                ips.push(fallback);
+            }
         }
+        ips
+    };
+    let mut arp_neighbors = collect_arp_neighbors();
+    if !local_probe_ips.is_empty() && !target_macs.is_empty() && !has_any_mac_match(&arp_neighbors, &target_macs) {
+        warmup_arp_by_udp_sweep(&local_probe_ips);
+        arp_neighbors = collect_arp_neighbors();
     }
     let devices = device_items
         .into_iter()
         .map(|item| {
-            let mac_address = json_field_to_string(&item, "macAddress")
+            let raw_mac_address = json_field_to_string(&item, "macAddress")
                 .or_else(|| json_field_to_string(&item, "mac"));
-            let normalized_mac = mac_address
+            let normalized_mac = raw_mac_address.as_deref().and_then(normalize_mac_address);
+            let matched_share_by_mac = normalized_mac
+                .as_ref()
+                .and_then(|mac| share_by_mac.get(mac).cloned());
+            let matched_share = matched_share_by_mac.clone().or_else(|| {
+                if device_total == 1 {
+                    single_share_fallback.clone()
+                } else {
+                    None
+                }
+            });
+            let transfer_host = matched_share.as_ref().and_then(|value| value.host.clone());
+            let share_lan_ip = transfer_host
                 .as_deref()
-                .and_then(normalize_mac_address);
-            let lan_ip = normalized_mac
+                .and_then(extract_ipv4_from_transfer_host);
+            let lan_ip_arp = normalized_mac
                 .as_ref()
                 .and_then(|mac| arp_neighbors.get(mac).cloned());
-            let ip_address = extract_device_ip(&item);
-            let same_lan_by_ip = match (
-                local_ipv4,
-                ip_address.as_deref().and_then(parse_ipv4_from_text),
-            ) {
-                (Some(local), Some(remote)) => in_same_lan_c24(local, remote),
-                _ => false,
+            let lan_ip = share_lan_ip.clone().or(lan_ip_arp.clone());
+            let ip_address = extract_device_ip(&item).or(share_lan_ip.clone());
+            let remote_ip = ip_address.as_deref().and_then(parse_ipv4_from_text);
+            let same_lan_by_ip = remote_ip
+                .map(|remote| local_probe_ips.iter().any(|local| in_same_lan_c24(*local, remote)))
+                .unwrap_or(false);
+            let login_status = json_field_to_string(&item, "loginStatus")
+                .or_else(|| matched_share.as_ref().and_then(|value| value.status.clone()));
+            let same_lan_by_share = transfer_host.is_some();
+            let same_lan_confident = same_lan_by_share || lan_ip_arp.is_some() || same_lan_by_ip;
+            let same_lan_fallback = !same_lan_confident
+                && device_total == 1
+                && !local_probe_ips.is_empty()
+                && is_online_status(login_status.as_deref());
+            let same_lan = same_lan_confident || same_lan_fallback;
+            let same_lan_reason = if same_lan_by_share {
+                if matched_share_by_mac.is_some() {
+                    Some("share_socket_mac".to_string())
+                } else {
+                    Some("share_socket_single_fallback".to_string())
+                }
+            } else if lan_ip_arp.is_some() {
+                Some("mac_arp".to_string())
+            } else if same_lan_by_ip {
+                Some("same_subnet".to_string())
+            } else if same_lan_fallback {
+                Some("single_device_online_fallback".to_string())
+            } else {
+                None
             };
 
             DashboardDevice {
@@ -2945,15 +3455,19 @@ fn build_dashboard_snapshot(app: &tauri::AppHandle) -> DashboardSnapshot {
                     .or_else(|| json_field_to_string(&item, "_id"))
                     .or_else(|| json_field_to_string(&item, "deviceId")),
                 model: json_field_to_string(&item, "model")
-                    .or_else(|| json_field_to_string(&item, "deviceModel")),
-                mac_address,
+                    .or_else(|| json_field_to_string(&item, "deviceModel"))
+                    .or_else(|| matched_share.as_ref().and_then(|value| value.model.clone())),
+                mac_address: raw_mac_address
+                    .or_else(|| matched_share.as_ref().and_then(|value| value.mac_address.clone())),
                 ip_address,
-                login_status: json_field_to_string(&item, "loginStatus"),
+                login_status,
                 latest_login_time: json_field_to_string(&item, "latestLoginTime"),
                 latest_logout_time: json_field_to_string(&item, "latestLogoutTime"),
                 locked: json_field_to_bool(&item, "lock"),
-                same_lan: lan_ip.is_some() || same_lan_by_ip,
+                same_lan,
                 lan_ip,
+                transfer_host,
+                same_lan_reason,
             }
         })
         .collect::<Vec<_>>();
@@ -3125,7 +3639,16 @@ fn run_lan_diagnostics(app: tauri::AppHandle) {
     let _ = ensure_main_window(&app, AppPage::Recent, false);
     refresh_cached_auth_token(&app);
     thread::spawn(move || {
-        let local_ipv4 = detect_local_ipv4();
+        let local_ipv4_candidates = collect_local_ipv4_candidates();
+        let mut local_probe_ips = local_ipv4_candidates
+            .iter()
+            .map(|(_, ip)| *ip)
+            .collect::<Vec<_>>();
+        if local_probe_ips.is_empty() {
+            if let Some(fallback) = detect_local_ipv4() {
+                local_probe_ips.push(fallback);
+            }
+        }
         let arp_before = collect_arp_neighbors();
         let client = match Client::builder().timeout(Duration::from_secs(20)).build() {
             Ok(client) => client,
@@ -3137,12 +3660,18 @@ fn run_lan_diagnostics(app: tauri::AppHandle) {
 
         let auth = fetch_auth_context(&client, &app);
         let mut lines = vec!["局域网诊断结果".to_string(), String::new()];
-        lines.push(format!(
-            "本机 IPv4: {}",
-            local_ipv4
+        if local_ipv4_candidates.is_empty() {
+            let fallback = local_probe_ips
+                .first()
                 .map(|value| value.to_string())
-                .unwrap_or_else(|| "未获取到".to_string())
-        ));
+                .unwrap_or_else(|| "未获取到".to_string());
+            lines.push(format!("本机 IPv4(回退): {fallback}"));
+        } else {
+            lines.push("本机 IPv4候选:".to_string());
+            for (idx, (iface, ip)) in local_ipv4_candidates.iter().enumerate() {
+                lines.push(format!("  {}. {} -> {}", idx + 1, iface, ip));
+            }
+        }
         lines.push(format!("ARP 邻居(预热前): {}", arp_before.len()));
 
         let mut neighbors = arp_before.clone();
@@ -3150,6 +3679,49 @@ fn run_lan_diagnostics(app: tauri::AppHandle) {
         match auth {
             Ok(auth_ctx) => {
                 lines.push(format!("认证: 成功 (uid={})", auth_ctx.uid));
+                let share_devices =
+                    match browser_fetch_share_devices_via_websocket(&app, &auth_ctx.uid, SHARE_WS_WAIT_MS) {
+                        Ok(items) => {
+                            lines.push(format!("Share 在线设备(官方链路): {}", items.len()));
+                            if items.is_empty() {
+                                lines.push("Share 设备详情: 无".to_string());
+                            } else {
+                                lines.push("Share 设备详情:".to_string());
+                                for (idx, item) in items.iter().enumerate() {
+                                    lines.push(format!(
+                                        "  {}. model={} | mac={} | host={} | status={}",
+                                        idx + 1,
+                                        item.model.clone().unwrap_or_else(|| "-".to_string()),
+                                        item.mac_address
+                                            .clone()
+                                            .unwrap_or_else(|| "-".to_string()),
+                                        item.host.clone().unwrap_or_else(|| "-".to_string()),
+                                        item.status.clone().unwrap_or_else(|| "-".to_string())
+                                    ));
+                                }
+                            }
+                            items
+                        }
+                        Err(err) => {
+                            lines.push(format!("Share 在线设备(官方链路): 失败 ({err})"));
+                            Vec::new()
+                        }
+                    };
+                let mut share_by_mac = HashMap::new();
+                for item in &share_devices {
+                    if let Some(mac) = item
+                        .mac_address
+                        .as_deref()
+                        .and_then(normalize_mac_address)
+                    {
+                        share_by_mac.entry(mac).or_insert_with(|| item.clone());
+                    }
+                }
+                let single_share_fallback = if share_devices.len() == 1 {
+                    share_devices.first().cloned()
+                } else {
+                    None
+                };
                 let devices_value = fetch_api_data_for_auth(
                     &client,
                     &app,
@@ -3159,6 +3731,7 @@ fn run_lan_diagnostics(app: tauri::AppHandle) {
                 match devices_value {
                     Ok(value) => {
                         let items = value_to_array(value);
+                        let device_total = items.len();
                         let target_macs = items
                             .iter()
                             .filter_map(|item| {
@@ -3167,13 +3740,13 @@ fn run_lan_diagnostics(app: tauri::AppHandle) {
                             })
                             .collect::<Vec<_>>();
                         lines.push(format!("账号设备数: {}", items.len()));
-                        if let Some(local_ip) = local_ipv4 {
-                            if !target_macs.is_empty() && !has_any_mac_match(&neighbors, &target_macs)
-                            {
-                                warmup_arp_by_udp_sweep(local_ip);
-                                neighbors = collect_arp_neighbors();
-                                warmed = true;
-                            }
+                        if !target_macs.is_empty()
+                            && !local_probe_ips.is_empty()
+                            && !has_any_mac_match(&neighbors, &target_macs)
+                        {
+                            warmup_arp_by_udp_sweep(&local_probe_ips);
+                            neighbors = collect_arp_neighbors();
+                            warmed = true;
                         }
                         lines.push(format!(
                             "ARP 邻居(预热后): {}{}",
@@ -3187,33 +3760,78 @@ fn run_lan_diagnostics(app: tauri::AppHandle) {
                             let model = json_field_to_string(item, "model")
                                 .or_else(|| json_field_to_string(item, "deviceModel"))
                                 .unwrap_or_else(|| "BOOX设备".to_string());
-                            let mac = json_field_to_string(item, "macAddress")
+                            let raw_mac = json_field_to_string(item, "macAddress")
                                 .or_else(|| json_field_to_string(item, "mac"));
-                            let normalized_mac =
-                                mac.as_deref().and_then(normalize_mac_address);
+                            let normalized_mac = raw_mac.as_deref().and_then(normalize_mac_address);
+                            let matched_share_by_mac = normalized_mac
+                                .as_ref()
+                                .and_then(|m| share_by_mac.get(m).cloned());
+                            let matched_share = matched_share_by_mac.clone().or_else(|| {
+                                if device_total == 1 {
+                                    single_share_fallback.clone()
+                                } else {
+                                    None
+                                }
+                            });
+                            let transfer_host =
+                                matched_share.as_ref().and_then(|v| v.host.clone());
+                            let share_ip = transfer_host
+                                .as_deref()
+                                .and_then(extract_ipv4_from_transfer_host);
                             let arp_ip = normalized_mac
                                 .as_ref()
                                 .and_then(|m| neighbors.get(m).cloned());
-                            let api_ip = extract_device_ip(item);
-                            let same_lan_by_ip = match (
-                                local_ipv4,
-                                api_ip.as_deref().and_then(parse_ipv4_from_text),
-                            ) {
-                                (Some(local), Some(remote)) => in_same_lan_c24(local, remote),
-                                _ => false,
+                            let api_ip = extract_device_ip(item).or(share_ip);
+                            let same_lan_by_ip = api_ip
+                                .as_deref()
+                                .and_then(parse_ipv4_from_text)
+                                .map(|remote| {
+                                    local_probe_ips
+                                        .iter()
+                                        .any(|local| in_same_lan_c24(*local, remote))
+                                })
+                                .unwrap_or(false);
+                            let login_status = json_field_to_string(item, "loginStatus")
+                                .or_else(|| matched_share.as_ref().and_then(|v| v.status.clone()));
+                            let same_lan_by_share = transfer_host.is_some();
+                            let same_lan_confident =
+                                same_lan_by_share || arp_ip.is_some() || same_lan_by_ip;
+                            let same_lan_fallback = !same_lan_confident
+                                && device_total == 1
+                                && !local_probe_ips.is_empty()
+                                && is_online_status(login_status.as_deref());
+                            let same_lan = same_lan_confident || same_lan_fallback;
+                            let reason = if same_lan_by_share {
+                                if matched_share_by_mac.is_some() {
+                                    "share_socket_mac"
+                                } else {
+                                    "share_socket_single_fallback"
+                                }
+                            } else if arp_ip.is_some() {
+                                "mac_arp"
+                            } else if same_lan_by_ip {
+                                "same_subnet"
+                            } else if same_lan_fallback {
+                                "single_device_online_fallback"
+                            } else {
+                                "none"
                             };
-                            let same_lan = arp_ip.is_some() || same_lan_by_ip;
                             if same_lan {
                                 hit_count += 1;
                             }
                             detail_rows.push(format!(
-                                "{}. {} | MAC={} | API_IP={} | ARP_IP={} | 同局域网={}",
+                                "{}. {} | MAC={} | HOST={} | API_IP={} | ARP_IP={} | 状态={} | 同局域网={} | reason={}",
                                 idx + 1,
                                 model,
-                                mac.unwrap_or_else(|| "-".to_string()),
+                                raw_mac
+                                    .or_else(|| matched_share.as_ref().and_then(|v| v.mac_address.clone()))
+                                    .unwrap_or_else(|| "-".to_string()),
+                                transfer_host.unwrap_or_else(|| "-".to_string()),
                                 api_ip.unwrap_or_else(|| "-".to_string()),
                                 arp_ip.unwrap_or_else(|| "-".to_string()),
-                                if same_lan { "是" } else { "否" }
+                                login_status.unwrap_or_else(|| "-".to_string()),
+                                if same_lan { "是" } else { "否" },
+                                reason
                             ));
                         }
                         lines.push(format!(
@@ -3766,37 +4384,6 @@ fn trigger_upload_from_tray(app: &tauri::AppHandle) {
     }
 }
 
-fn ensure_calendar_stats_window(app: &tauri::AppHandle) -> Option<Window> {
-    if let Some(window) = app.get_window(CALENDAR_LABEL) {
-        return Some(window);
-    }
-
-    let parsed_url = match CALENDAR_URL.parse() {
-        Ok(value) => value,
-        Err(err) => {
-            report_error(app, "日历页面 URL 非法", &err);
-            return None;
-        }
-    };
-
-    match WindowBuilder::new(app, CALENDAR_LABEL, WindowUrl::External(parsed_url))
-        .title("Send2Boox - Calendar Stats")
-        .visible(false)
-        .focused(false)
-        .resizable(false)
-        .inner_size(600.0, 400.0)
-        .skip_taskbar(true)
-        .on_navigation(|url| is_allowed_navigation(url.as_str()))
-        .build()
-    {
-        Ok(window) => Some(window),
-        Err(err) => {
-            report_error(app, "创建日历统计后台窗口失败", &err);
-            None
-        }
-    }
-}
-
 fn poll_calendar_stats_title(app: tauri::AppHandle) {
     thread::spawn(move || {
         for _ in 0..25 {
@@ -3817,24 +4404,30 @@ fn poll_calendar_stats_title(app: tauri::AppHandle) {
                 return;
             }
         }
-        set_calendar_stats_label(&app, "日历统计: 暂无统计");
+        set_calendar_stats_label(&app, "阅读统计指标: 暂无统计");
     });
 }
 
 fn refresh_calendar_stats(app: &tauri::AppHandle) {
-    set_calendar_stats_label(app, "日历统计: 刷新中...");
-    let Some(window) = ensure_calendar_stats_window(app) else {
-        return;
-    };
-    if let Err(err) = window.eval(&redirect_script(CALENDAR_URL)) {
-        report_error(app, "切换到日历页面失败", &err);
-        return;
-    }
-    if let Err(err) = window.eval(CALENDAR_STATS_SCRIPT) {
-        report_error(app, "提取日历统计失败", &err);
-        return;
-    }
-    poll_calendar_stats_title(app.clone());
+    set_calendar_stats_label(app, "阅读统计指标: 刷新中...");
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let app_for_task = app_handle.clone();
+        let snapshot_result =
+            tauri::async_runtime::spawn_blocking(move || build_dashboard_snapshot(&app_for_task))
+                .await
+                .map_err(|err| err.to_string());
+        match snapshot_result {
+            Ok(snapshot) => {
+                set_dashboard_cache(&app_handle, snapshot.clone());
+                sync_reading_metrics_menu_from_snapshot(&app_handle, &snapshot);
+            }
+            Err(err) => {
+                set_calendar_stats_label(&app_handle, "阅读统计指标: 刷新失败");
+                log_error("刷新阅读统计指标失败", &err);
+            }
+        }
+    });
 }
 
 fn build_auto_launch(app: &tauri::AppHandle) -> Result<AutoLaunch, String> {
@@ -3943,8 +4536,8 @@ fn main() {
     let upload_diag = CustomMenuItem::new(UPLOAD_DIAG_ID, "上传诊断");
     let lan_diag = CustomMenuItem::new(LAN_DIAG_ID, "局域网诊断");
     let upload_progress = CustomMenuItem::new(UPLOAD_PROGRESS_ID, "上传进度: 空闲");
-    let calendar_stats = CustomMenuItem::new(CALENDAR_STATS_ID, "日历统计: 未加载");
-    let refresh_calendar_item = CustomMenuItem::new(REFRESH_CALENDAR_ID, "刷新日历统计");
+    let calendar_stats = CustomMenuItem::new(CALENDAR_STATS_ID, "阅读统计指标: 未加载");
+    let refresh_calendar_item = CustomMenuItem::new(REFRESH_CALENDAR_ID, "刷新阅读统计指标");
     let toggle_autostart = CustomMenuItem::new(TOGGLE_AUTOSTART_ID, "开机自启动: --");
     let quit = CustomMenuItem::new("quit", "退出");
     let page_recent = CustomMenuItem::new("page_recent", "最近笔记");
@@ -3981,6 +4574,7 @@ fn main() {
             dashboard_open_main,
             dashboard_login_authorize,
             dashboard_upload_pick_and_send,
+            dashboard_open_transfer_host,
             dashboard_push_resend,
             dashboard_push_delete,
             dashboard_hide
@@ -4064,7 +4658,7 @@ fn main() {
                     set_calendar_stats_label(&window.app_handle(), &text);
                 } else {
                     if let Err(err) = window.eval(CALENDAR_STATS_SCRIPT) {
-                        report_error(&window.app_handle(), "提取日历统计失败", &err);
+                        report_error(&window.app_handle(), "提取阅读统计指标失败", &err);
                     }
                     poll_calendar_stats_title(window.app_handle());
                 }
@@ -4173,7 +4767,7 @@ mod tests {
     #[test]
     fn parse_calendar_stats_from_title_prefix() {
         let parsed = parse_calendar_stats_title("S2B_CAL_STATS::今日:3 | 本月:10");
-        assert_eq!(parsed.as_deref(), Some("日历统计: 今日:3 | 本月:10"));
+        assert_eq!(parsed.as_deref(), Some("阅读统计指标: 今日:3 | 本月:10"));
         assert!(parse_calendar_stats_title("random title").is_none());
     }
 
@@ -4181,7 +4775,7 @@ mod tests {
     fn parse_calendar_stats_from_url_hash_query() {
         let input = "https://send2boox.com/#/calendar?trayStats=%E4%BB%8A%E6%97%A5%3A3%20%7C%20%E6%9C%AC%E6%9C%88%3A10";
         let parsed = parse_calendar_stats_from_url(input);
-        assert_eq!(parsed.as_deref(), Some("日历统计: 今日:3 | 本月:10"));
+        assert_eq!(parsed.as_deref(), Some("阅读统计指标: 今日:3 | 本月:10"));
         assert!(parse_calendar_stats_from_url("https://send2boox.com/#/calendar").is_none());
     }
 
