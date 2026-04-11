@@ -72,3 +72,7 @@ Default bundle target is `app` (configured for internal gray release).
 - Artifact: macOS `.dmg` + Windows `.msi`
 - Release tag format: `build-YYYY-MM-DD` (timezone `Asia/Shanghai`)
 - If multiple builds happen in one day, workflow force-moves the same date tag and updates the same GitHub Release.
+
+## Community support
+
+- Linux.do: https://linux.do

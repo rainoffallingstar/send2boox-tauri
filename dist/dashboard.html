@@ -13,72 +13,94 @@
       <div class="bg-orb orb-b"></div>
       <main class="panel">
         <header class="panel-header">
-          <div class="header-primary">
-            <div class="title-wrap">
-              <p class="eyebrow">Send2Boox Desktop</p>
-              <h1>Flow Deck</h1>
-              <p class="deck-note">Upload · Sync · Reading</p>
-              <div class="status-row">
-                <span id="auth-chip" class="chip chip-pending">初始化中</span>
-                <span id="sync-time" class="sync-time">刚刚</span>
+          <div class="header-hero">
+            <div class="header-primary">
+              <div class="title-wrap">
+                <p class="eyebrow">Send2Boox Desktop</p>
+                <div class="title-line">
+                  <h1>Flow Deck</h1>
+                  <span class="hero-badge">Control Surface</span>
+                </div>
+                <p class="deck-note">Upload · Sync · Reading</p>
+                <div class="status-row header-status-row">
+                  <span id="auth-chip" class="chip chip-pending">初始化中</span>
+                  <span id="sync-time" class="sync-time">刚刚</span>
+                </div>
               </div>
-            </div>
-            <div class="deck-storage">
-              <div class="deck-storage-head">
-                <span class="deck-storage-label">云空间</span>
-                <span id="storage-text" class="deck-storage-value">-</span>
-              </div>
-              <div class="progress-track deck-storage-track">
-                <div id="storage-bar" class="progress-bar"></div>
+              <div class="hero-side">
+                <div class="hero-pill hero-pill-storage">
+                  <div class="deck-storage-head">
+                    <span class="deck-storage-label">云空间</span>
+                    <span id="storage-text" class="deck-storage-value">-</span>
+                  </div>
+                  <div class="progress-track deck-storage-track">
+                    <div id="storage-bar" class="progress-bar"></div>
+                  </div>
+                </div>
+                <div class="hero-pill hero-pill-note">
+                  <span class="hero-pill-label">Mode</span>
+                  <span class="hero-pill-value">Tray First</span>
+                </div>
               </div>
             </div>
           </div>
-          <div class="header-actions">
-            <label class="refresh-setting" for="refresh-interval-minutes">
-              <span>自动刷新</span>
-              <input
-                id="refresh-interval-minutes"
-                type="number"
-                min="0.1"
-                step="0.1"
-                inputmode="decimal"
-                value="1"
-              />
-              <span>分钟</span>
-              <button id="refresh-apply-btn" class="btn btn-ghost btn-xs" type="button">应用</button>
-            </label>
-            <button id="open-main-btn" class="btn btn-ghost">打开主界面</button>
-            <button id="refresh-btn" class="btn btn-ghost">刷新</button>
+          <div class="header-actions-panel">
+            <div class="header-actions-caption">Workspace Controls</div>
+            <div class="header-actions">
+              <label class="refresh-setting" for="refresh-interval-minutes">
+                <span>自动刷新</span>
+                <input
+                  id="refresh-interval-minutes"
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  inputmode="decimal"
+                  value="1"
+                />
+                <span>分钟</span>
+                <button id="refresh-apply-btn" class="btn btn-ghost btn-xs" type="button">应用</button>
+              </label>
+              <button id="open-main-btn" class="btn btn-ghost">打开主界面</button>
+              <button id="refresh-btn" class="btn btn-ghost">刷新</button>
+            </div>
           </div>
         </header>
 
         <div class="dashboard-grid">
           <div class="dashboard-stack dashboard-main">
             <section class="card card-auth" id="auth-card">
-              <div class="card-title-row">
-                <h2>授权状态</h2>
-                <div class="card-actions">
-                  <button class="card-refresh" data-card-refresh="auth" title="刷新授权状态">↻</button>
-                  <button id="login-btn" class="btn btn-primary">登录并授权</button>
+              <div class="auth-shell">
+                <div class="card-title-row">
+                  <h2>授权状态</h2>
+                  <div class="card-actions">
+                    <button class="card-refresh" data-card-refresh="auth" title="刷新授权状态">↻</button>
+                    <button id="login-btn" class="btn btn-primary">登录并授权</button>
+                  </div>
+                </div>
+                <div class="auth-band">
+                  <p id="auth-status" class="muted auth-status-text">初始化中...</p>
                 </div>
               </div>
-              <p id="auth-status" class="muted">初始化中...</p>
             </section>
 
             <section class="card card-queue">
-              <div class="card-title-row">
-                <h2>互动文件列表</h2>
-                <div class="card-actions">
-                  <button class="card-refresh" data-card-refresh="queue" title="刷新互动文件列表">↻</button>
-                  <button id="upload-btn" class="btn btn-primary">上传文件</button>
+              <div class="queue-hero">
+                <div class="card-title-row">
+                  <h2>互动文件列表</h2>
+                  <div class="card-actions">
+                    <button class="card-refresh" data-card-refresh="queue" title="刷新互动文件列表">↻</button>
+                    <button id="upload-btn" class="btn btn-primary">上传文件</button>
+                  </div>
+                </div>
+                <div class="queue-toolbar">
+                  <p id="upload-status" class="muted queue-status-text">上传进度: 空闲</p>
+                  <p id="upload-metrics" class="muted queue-metrics-text">0.0% · -/s · 剩余 -</p>
                 </div>
               </div>
-              <p id="upload-status" class="muted">上传进度: 空闲</p>
               <div class="upload-progress-wrap">
                 <div class="progress-track upload-track">
                   <div id="upload-progress-bar" class="progress-bar upload-progress-bar"></div>
                 </div>
-                <p id="upload-metrics" class="muted">0.0% · -/s · 剩余 -</p>
               </div>
               <ul id="push-list" class="push-list"></ul>
             </section>
@@ -86,28 +108,38 @@
 
           <div class="dashboard-stack dashboard-side">
             <section class="card card-user">
-              <div class="card-title-row">
-                <h2>用户与设备</h2>
-                <div class="card-actions">
-                  <span id="profile-uid" class="muted"></span>
-                  <button class="card-refresh" data-card-refresh="user" title="刷新用户与设备">↻</button>
+              <div class="user-hero">
+                <div class="card-title-row">
+                  <h2>用户与设备</h2>
+                  <div class="card-actions">
+                    <button class="card-refresh" data-card-refresh="user" title="刷新用户与设备">↻</button>
+                  </div>
                 </div>
+                <div id="profile-uid" class="meta-pill">uid: -</div>
+                <p id="profile-name" class="main-value">-</p>
+                <p id="device-summary" class="muted user-summary">设备信息加载中...</p>
               </div>
-              <p id="profile-name" class="main-value">-</p>
-              <p id="device-summary" class="muted">设备信息加载中...</p>
-              <div id="lan-device-list" class="lan-device-list"></div>
+              <div class="device-block">
+                <div class="device-block-head">
+                  <span class="section-kicker">LAN 设备</span>
+                </div>
+                <div id="lan-device-list" class="lan-device-list"></div>
+              </div>
             </section>
 
             <section class="card card-metrics">
-              <div class="card-title-row">
-                <h2>阅读指标</h2>
-                <div class="card-actions">
-                  <span class="muted">今日 / 本周</span>
-                  <button class="card-refresh" data-card-refresh="metrics" title="刷新阅读指标">↻</button>
+              <div class="metrics-shell">
+                <div class="card-title-row">
+                  <h2>阅读指标</h2>
+                  <div class="card-actions">
+                    <span class="muted">今日 / 本周</span>
+                    <button class="card-refresh" data-card-refresh="metrics" title="刷新阅读指标">↻</button>
+                  </div>
                 </div>
+                <p class="metrics-intro">阅读进度与完成情况在这里汇总。</p>
               </div>
               <div class="metrics-grid">
-                <div class="metric">
+                <div class="metric metric-featured">
                   <p class="metric-label">今日阅读数</p>
                   <p id="metric-today-read" class="metric-value">-</p>
                 </div>
