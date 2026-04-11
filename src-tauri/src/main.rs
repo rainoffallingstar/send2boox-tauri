@@ -58,7 +58,7 @@ const MAX_SINGLE_UPLOAD_BYTES: u64 = 200 * 1024 * 1024;
 const DEFAULT_BUCKET_KEY: &str = "onyx-cloud";
 const DASHBOARD_WIDTH: f64 = 900.0;
 const DASHBOARD_HEIGHT: f64 = 720.0;
-const DASHBOARD_GAP: f64 = -6.0;
+const DASHBOARD_GAP: f64 = 12.0;
 const DASHBOARD_PUSH_QUEUE_LIMIT: usize = 30;
 const DASHBOARD_CACHE_MAX_AGE_MS: u128 = 5_000;
 const SHARE_WS_WAIT_MS: u64 = 2_200;
@@ -550,6 +550,20 @@ fn is_allowed_navigation(url: &str) -> bool {
             parsed.host_str(),
             Some(ALLOWED_HOST_1) | Some(ALLOWED_HOST_2)
         )
+}
+
+fn is_login_url(url: &str) -> bool {
+    url.contains("#/login")
+}
+
+#[cfg(target_os = "windows")]
+fn allow_hidden_main_window_bootstrap() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn allow_hidden_main_window_bootstrap() -> bool {
+    true
 }
 
 fn tray_action_from_id(id: &str) -> TrayAction {
@@ -1108,8 +1122,11 @@ fn complete_login_authorization_if_needed(app: &tauri::AppHandle) {
     let app_handle = app.clone();
     if let Err(err) = app.run_on_main_thread(move || {
         if let Some(main) = app_handle.get_window(MAIN_LABEL) {
-            if let Err(err) = main.hide() {
-                log_error("登录后隐藏主页面失败", &err);
+            let current_url = main.url().to_string();
+            if !is_login_url(&current_url) {
+                if let Err(err) = main.hide() {
+                    log_error("登录后隐藏主页面失败", &err);
+                }
             }
         }
         show_dashboard_window_from_last_anchor(&app_handle);
@@ -2144,7 +2161,11 @@ fn fetch_auth_context_and_user(
     hydrate_cached_auth_state(app);
     let mut cached = wait_for_cached_auth_state(app, 1_200);
     if !has_auth_state(&cached) {
-        bootstrap_auth_from_main_window(app, 3_500);
+        if app.get_window(MAIN_LABEL).is_some() {
+            refresh_cached_auth_token(app);
+        } else if allow_hidden_main_window_bootstrap() {
+            bootstrap_auth_from_main_window(app, 3_500);
+        }
         cached = wait_for_cached_auth_state(app, 500);
     }
     let bearer = normalize_optional(cached.token);
@@ -4194,10 +4215,18 @@ fn compute_dashboard_position(
     monitor_h: f64,
 ) -> (f64, f64) {
     let mut x = tray_x + (tray_w / 2.0) - (DASHBOARD_WIDTH / 2.0);
-    let mut y = tray_y + tray_h + DASHBOARD_GAP;
     let min_x = monitor_x + 8.0;
     let max_x = monitor_x + monitor_w - DASHBOARD_WIDTH - 8.0;
-    let min_y = monitor_y;
+    let space_above = tray_y - monitor_y;
+    let space_below = (monitor_y + monitor_h) - (tray_y + tray_h);
+    let prefer_above =
+        space_above >= DASHBOARD_HEIGHT + DASHBOARD_GAP || space_above > space_below;
+    let mut y = if prefer_above {
+        tray_y - DASHBOARD_HEIGHT - DASHBOARD_GAP
+    } else {
+        tray_y + tray_h + DASHBOARD_GAP
+    };
+    let min_y = monitor_y + 8.0;
     let max_y = monitor_y + monitor_h - DASHBOARD_HEIGHT - 8.0;
     if max_x >= min_x {
         x = x.clamp(min_x, max_x);
@@ -4756,6 +4785,13 @@ mod tests {
     }
 
     #[test]
+    fn login_url_matching_is_hash_based() {
+        assert!(is_login_url("https://send2boox.com/#/login"));
+        assert!(is_login_url("https://send2boox.com/#/login?redirect=recent"));
+        assert!(!is_login_url("https://send2boox.com/#/note/recentNote"));
+    }
+
+    #[test]
     fn calendar_url_matching_is_hash_based() {
         assert!(is_calendar_url("https://send2boox.com/#/calendar"));
         assert!(is_calendar_url(
@@ -4800,5 +4836,13 @@ mod tests {
             compute_dashboard_position(960.0, 1040.0, 24.0, 24.0, 0.0, 0.0, 1920.0, 1080.0);
         assert!(y <= 1040.0);
         assert!(y + DASHBOARD_HEIGHT <= 1080.0);
+    }
+
+    #[test]
+    fn dashboard_position_prefers_above_bottom_tray() {
+        let (_, y) =
+            compute_dashboard_position(1820.0, 1040.0, 24.0, 24.0, 0.0, 0.0, 1920.0, 1080.0);
+        assert!(y < 1040.0);
+        assert!(y + DASHBOARD_HEIGHT <= 1040.0);
     }
 }
