@@ -21,6 +21,8 @@ use std::{
     time::{Duration, Instant},
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use tauri::{
     api::dialog::{blocking::message, FileDialogBuilder},
     CustomMenuItem, Manager, Menu, Submenu, SystemTray, SystemTrayEvent, SystemTrayMenu,
@@ -64,92 +66,8 @@ const DASHBOARD_CACHE_MAX_AGE_MS: u128 = 5_000;
 const SHARE_WS_WAIT_MS: u64 = 2_200;
 const AUTH_CACHE_FILE: &str = "auth_cache.json";
 #[cfg(target_os = "windows")]
-const WINDOWS_MAIN_WINDOW_INIT_SCRIPT: &str = r#"
-(() => {
-  try {
-    window.__S2B_DESKTOP__ = true;
-
-    try {
-      const sw = navigator.serviceWorker;
-      if (sw) {
-        try {
-          sw.register = () => Promise.resolve({
-            active: null,
-            installing: null,
-            waiting: null,
-            scope: window.location.origin,
-            unregister: () => Promise.resolve(true),
-            update: () => Promise.resolve()
-          });
-        } catch (_) {}
-
-        sw.getRegistrations()
-          .then((registrations) => Promise.all(registrations.map((item) => item.unregister().catch(() => false))))
-          .catch(() => {});
-      }
-    } catch (_) {}
-
-    try {
-      if ('caches' in window) {
-        caches.keys()
-          .then((keys) => Promise.all(keys.map((key) => caches.delete(key).catch(() => false))))
-          .catch(() => {});
-      }
-    } catch (_) {}
-
-    const routeKey = 's2b-desktop-reload:' + (window.location.pathname || '/') + '::' + ((window.location.hash || '#/').split('?')[0] || '#/');
-    const hasVisibleAppContent = () => {
-      const app = document.getElementById('app');
-      if (!app) return false;
-      if (app.childElementCount > 0) return true;
-      const text = (app.textContent || '').replace(/\s+/g, '');
-      return text.length > 0;
-    };
-
-    const startRecoveryWatch = () => {
-      let ticks = 0;
-      const timer = setInterval(() => {
-        if (document.hidden) return;
-        if (hasVisibleAppContent()) {
-          clearInterval(timer);
-          try { sessionStorage.removeItem(routeKey); } catch (_) {}
-          return;
-        }
-
-        ticks += 1;
-        if (ticks < 40) return;
-        clearInterval(timer);
-
-        let alreadyReloaded = false;
-        try {
-          alreadyReloaded = sessionStorage.getItem(routeKey) === '1';
-        } catch (_) {}
-        if (alreadyReloaded) return;
-
-        try {
-          sessionStorage.setItem(routeKey, '1');
-        } catch (_) {}
-
-        try {
-          const next = new URL(window.location.href);
-          next.searchParams.set('desktopReload', String(Date.now()));
-          window.location.replace(next.toString());
-        } catch (_) {
-          window.location.reload();
-        }
-      }, 250);
-
-      window.addEventListener('beforeunload', () => clearInterval(timer), { once: true });
-    };
-
-    if (document.readyState === 'loading') {
-      window.addEventListener('DOMContentLoaded', startRecoveryWatch, { once: true });
-    } else {
-      startRecoveryWatch();
-    }
-  } catch (_) {}
-})();
-"#;
+const WINDOWS_MAIN_WINDOW_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0";
 const AUTH_TOKEN_CAPTURE_SCRIPT: &str = r#"
 (() => {
   try {
@@ -256,7 +174,6 @@ struct RuntimeState {
     cached_auth_state: Mutex<CachedAuthState>,
     upload_runtime_state: Mutex<UploadRuntimeState>,
     login_authorizing: Mutex<bool>,
-    allow_main_window_close: Mutex<bool>,
     last_tray_anchor: Mutex<Option<(f64, f64, f64, f64)>>,
     dashboard_cache: Mutex<Option<DashboardSnapshot>>,
 }
@@ -628,12 +545,12 @@ fn redirect_script(url: &str) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn main_window_init_script() -> Option<&'static str> {
-    Some(WINDOWS_MAIN_WINDOW_INIT_SCRIPT)
+fn main_window_user_agent() -> Option<&'static str> {
+    Some(WINDOWS_MAIN_WINDOW_USER_AGENT)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn main_window_init_script() -> Option<&'static str> {
+fn main_window_user_agent() -> Option<&'static str> {
     None
 }
 
@@ -662,61 +579,6 @@ fn allow_hidden_main_window_bootstrap() -> bool {
 #[cfg(not(target_os = "windows"))]
 fn allow_hidden_main_window_bootstrap() -> bool {
     true
-}
-
-fn set_allow_main_window_close(app: &tauri::AppHandle, value: bool) {
-    match app.state::<RuntimeState>().allow_main_window_close.lock() {
-        Ok(mut flag) => {
-            *flag = value;
-        }
-        Err(err) => eprintln!("[send2boox][warn] 更新主窗口关闭开关失败: {err}"),
-    }
-}
-
-fn can_close_main_window(app: &tauri::AppHandle) -> bool {
-    match app.state::<RuntimeState>().allow_main_window_close.lock() {
-        Ok(flag) => *flag,
-        Err(err) => {
-            eprintln!("[send2boox][warn] 读取主窗口关闭开关失败: {err}");
-            false
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn should_rebuild_main_window(page: AppPage, visible: bool) -> bool {
-    visible || matches!(page, AppPage::Login)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn should_rebuild_main_window(_page: AppPage, _visible: bool) -> bool {
-    false
-}
-
-fn close_main_window_for_rebuild(app: &tauri::AppHandle) -> bool {
-    let Some(window) = app.get_window(MAIN_LABEL) else {
-        return true;
-    };
-
-    set_allow_main_window_close(app, true);
-    let close_result = window.close();
-    if let Err(err) = close_result {
-        set_allow_main_window_close(app, false);
-        log_error("关闭旧主窗口失败", &err);
-        return false;
-    }
-
-    for _ in 0..30 {
-        if app.get_window(MAIN_LABEL).is_none() {
-            set_allow_main_window_close(app, false);
-            return true;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-
-    set_allow_main_window_close(app, false);
-    eprintln!("[send2boox][warn] 等待旧主窗口关闭超时，将继续尝试复用旧窗口");
-    false
 }
 
 fn tray_action_from_id(id: &str) -> TrayAction {
@@ -3242,8 +3104,10 @@ fn open_external_url(url: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn open_external_url(url: &str) -> Result<(), String> {
-    let status = Command::new("cmd")
-        .args(["/C", "start", "", url])
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let status = Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .creation_flags(CREATE_NO_WINDOW)
         .status()
         .map_err(|err| err.to_string())?;
     if status.success() {
@@ -4277,10 +4141,6 @@ fn run_native_upload_task(app: tauri::AppHandle, files: Vec<PathBuf>) {
 }
 
 fn ensure_main_window(app: &tauri::AppHandle, page: AppPage, visible: bool) -> Option<Window> {
-    if should_rebuild_main_window(page, visible) && app.get_window(MAIN_LABEL).is_some() {
-        let _ = close_main_window_for_rebuild(app);
-    }
-
     if let Some(window) = app.get_window(MAIN_LABEL) {
         if let Err(err) = window.eval(&redirect_script(page.url())) {
             report_error(app, "切换页面失败", &err);
@@ -4316,8 +4176,8 @@ fn ensure_main_window(app: &tauri::AppHandle, page: AppPage, visible: bool) -> O
         .visible(visible)
         .on_navigation(|url| is_allowed_navigation(url.as_str()));
 
-    if let Some(script) = main_window_init_script() {
-        builder = builder.initialization_script(script);
+    if let Some(user_agent) = main_window_user_agent() {
+        builder = builder.user_agent(user_agent);
     }
 
     match builder.build() {
@@ -4867,11 +4727,6 @@ fn main() {
         })
         .on_window_event(|event| {
             if let WindowEvent::CloseRequested { api, .. } = event.event() {
-                if event.window().label() == MAIN_LABEL
-                    && can_close_main_window(&event.window().app_handle())
-                {
-                    return;
-                }
                 api.prevent_close();
                 if let Err(err) = event.window().hide() {
                     log_error("隐藏窗口失败", &err);
@@ -4913,11 +4768,11 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn main_window_init_script_is_configured_for_windows_behavior() {
-        let script = WINDOWS_MAIN_WINDOW_INIT_SCRIPT;
-        assert!(script.contains("navigator.serviceWorker"));
-        assert!(script.contains("desktopReload"));
-        assert!(script.contains("s2b-desktop-reload"));
+    fn main_window_user_agent_looks_like_desktop_browser() {
+        let user_agent = WINDOWS_MAIN_WINDOW_USER_AGENT;
+        assert!(user_agent.contains("Windows NT 10.0"));
+        assert!(user_agent.contains("Chrome/"));
+        assert!(user_agent.contains("Edg/"));
     }
 
     #[test]
