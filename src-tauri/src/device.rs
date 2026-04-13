@@ -4,14 +4,18 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddrV4, TcpStream, UdpSocket},
-    process::Command,
+    process::{Command, Output},
     thread,
     time::Duration,
 };
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use tungstenite::{connect, stream::MaybeTlsStream, Message, WebSocket};
 use uuid::Uuid;
 
 const SHARE_WS_WAIT_MS: u64 = 2_200;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 fn set_socket_read_timeout(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>, timeout_ms: u64) {
     let timeout = Some(Duration::from_millis(timeout_ms));
@@ -339,9 +343,56 @@ pub fn extract_device_ip(item: &Value) -> Option<String> {
     .find_map(|key| json_field_to_string(item, key))
 }
 
+#[cfg(target_os = "windows")]
+fn command_output(program: &str, args: &[&str]) -> Option<Output> {
+    Command::new(program)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn command_output(program: &str, args: &[&str]) -> Option<Output> {
+    Command::new(program).args(args).output().ok()
+}
+
+#[cfg(target_os = "windows")]
 fn collect_arp_neighbors() -> HashMap<String, String> {
-    let output = match Command::new("arp").arg("-an").output() {
-        Ok(output) if output.status.success() => output,
+    let output = match command_output("arp", &["-a"]) {
+        Some(output) if output.status.success() => output,
+        _ => return HashMap::new(),
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut neighbors = HashMap::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("Interface:") {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let Some(ip_token) = parts.next() else {
+            continue;
+        };
+        let Some(mac_token) = parts.next() else {
+            continue;
+        };
+        let Some(ip) = parse_ipv4_from_text(ip_token).map(|value| value.to_string()) else {
+            continue;
+        };
+        let Some(mac) = normalize_mac_address(mac_token) else {
+            continue;
+        };
+        neighbors.insert(mac, ip);
+    }
+    neighbors
+}
+
+#[cfg(not(target_os = "windows"))]
+fn collect_arp_neighbors() -> HashMap<String, String> {
+    let output = match command_output("arp", &["-an"]) {
+        Some(output) if output.status.success() => output,
         _ => return HashMap::new(),
     };
 
@@ -373,9 +424,57 @@ fn collect_arp_neighbors() -> HashMap<String, String> {
     neighbors
 }
 
+#[cfg(target_os = "windows")]
 fn collect_local_ipv4_candidates() -> Vec<(String, Ipv4Addr)> {
-    let output = match Command::new("ifconfig").output() {
-        Ok(output) if output.status.success() => output,
+    let output = match command_output("ipconfig", &[]) {
+        Some(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    let mut result = Vec::new();
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut current_iface = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if !line.starts_with(' ') && trimmed.ends_with(':') {
+            current_iface = trimmed.trim_end_matches(':').to_string();
+            continue;
+        }
+
+        if !trimmed.contains("IPv4") {
+            continue;
+        }
+
+        let iface = current_iface.trim();
+        if iface.is_empty() {
+            continue;
+        }
+
+        let Some(ip) = parse_ipv4_from_text(trimmed) else {
+            continue;
+        };
+        if ip.is_loopback() || ip.is_link_local() {
+            continue;
+        }
+        if !is_private_or_cgnat_ipv4(ip) {
+            continue;
+        }
+        result.push((iface.to_string(), ip));
+    }
+
+    result.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.octets().cmp(&b.1.octets())));
+    result.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    result
+}
+
+#[cfg(not(target_os = "windows"))]
+fn collect_local_ipv4_candidates() -> Vec<(String, Ipv4Addr)> {
+    let output = match command_output("ifconfig", &[]) {
+        Some(output) if output.status.success() => output,
         _ => return Vec::new(),
     };
 
