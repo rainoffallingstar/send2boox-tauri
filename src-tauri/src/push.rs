@@ -4,7 +4,7 @@ use crate::api::{
     put_push_message_doc, save_and_push,
 };
 use crate::app::{
-    clear_upload_transfer_metrics, hide_dashboard_window, open_external_url,
+    clear_upload_transfer_metrics, open_external_url,
     set_upload_progress_label, update_upload_transfer_metrics,
 };
 use crate::dashboard::build_dashboard_snapshot;
@@ -31,7 +31,7 @@ use std::{
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use uuid::Uuid;
 
-const APP_ALERT_TITLE: &str = "Send2Boox Desktop";
+const APP_ALERT_TITLE: &str = "Send2Boox 控制中心";
 const MAX_SINGLE_UPLOAD_BYTES: u64 = 200 * 1024 * 1024;
 const MIN_STS_REMAINING_SECS_FOR_SIGNED_URL: i64 = 120;
 
@@ -754,7 +754,6 @@ pub fn trigger_upload_from_tray(app: &tauri::AppHandle) {
     }
 
     set_upload_progress_label(app, "上传进度: 等待选择文件...");
-    hide_dashboard_window(app);
     let app_handle = app.clone();
     let run_result = app.run_on_main_thread(move || {
         app_handle.dialog().file().pick_files(move |files| {

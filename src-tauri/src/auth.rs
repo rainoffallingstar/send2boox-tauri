@@ -438,7 +438,7 @@ fn login_page_html(state: &str) -> String {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Send2Boox Desktop Login</title>
+    <title>Send2Boox 登录授权</title>
     <script defer src="https://g.alicdn.com/AWSC/AWSC/awsc.js"></script>
     <script defer src="https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js"></script>
     <style>
@@ -665,7 +665,7 @@ fn login_page_html(state: &str) -> String {
   </head>
   <body>
     <main class="panel">
-      <p class="eyebrow">Send2Boox Desktop</p>
+      <p class="eyebrow">Send2Boox</p>
       <h1>选择登录与授权方式</h1>
       <p class="desc">现在支持微信扫码、BOOX 助手扫码、手机号验证码登录、邮箱验证码登录。所有登录成功后都会把授权状态同步回桌面端，并自动回到仪表盘。</p>
 
@@ -1278,7 +1278,7 @@ fn callback_page_html() -> String {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Login Complete</title>
+    <title>Send2Boox 登录完成</title>
     <style>
       body {
         margin: 0;
