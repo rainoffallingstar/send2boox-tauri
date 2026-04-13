@@ -532,6 +532,12 @@ fn login_page_html(state: &str) -> String {
         gap: 12px;
         flex-wrap: wrap;
       }}
+      .field-actions {{
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 8px;
+      }}
       .btn {{
         appearance: none;
         border: 0;
@@ -708,7 +714,6 @@ fn login_page_html(state: &str) -> String {
       <section id="phone-flow" class="shell flow" hidden>
         <div class="actions">
           <button id="phone-send-btn" class="btn btn-secondary" type="button">获取短信验证码</button>
-          <button id="phone-login-btn" class="btn btn-primary" type="button">登录并同步桌面端</button>
           <button data-back class="btn btn-ghost" type="button">返回方式选择</button>
         </div>
         <div id="phone-status" class="status">请输入手机号并获取验证码。</div>
@@ -727,13 +732,15 @@ fn login_page_html(state: &str) -> String {
               <button id="phone-send-inline-btn" class="btn btn-ghost" type="button">发送验证码</button>
             </div>
           </div>
+          <div class="field-actions">
+            <button id="phone-login-btn" class="btn btn-primary" type="button">登录并同步桌面端</button>
+          </div>
         </div>
       </section>
 
       <section id="email-flow" class="shell flow" hidden>
         <div class="actions">
           <button id="email-send-btn" class="btn btn-secondary" type="button">获取邮箱验证码</button>
-          <button id="email-login-btn" class="btn btn-primary" type="button">登录并同步桌面端</button>
           <button data-back class="btn btn-ghost" type="button">返回方式选择</button>
         </div>
         <div id="email-status" class="status">请输入邮箱并获取验证码。</div>
@@ -748,6 +755,9 @@ fn login_page_html(state: &str) -> String {
               <input id="email-code" class="input" type="text" placeholder="请输入邮箱验证码" inputmode="numeric" />
               <button id="email-send-inline-btn" class="btn btn-ghost" type="button">发送验证码</button>
             </div>
+          </div>
+          <div class="field-actions">
+            <button id="email-login-btn" class="btn btn-primary" type="button">登录并同步桌面端</button>
           </div>
         </div>
       </section>
@@ -911,15 +921,15 @@ fn login_page_html(state: &str) -> String {
       }}
 
       function isPhoneValid() {{
-        return /^\\d{{5,20}}$/.test(String(phoneMobiInput.value || "").trim());
+        return /^\d{{5,20}}$/.test(String(phoneMobiInput.value || "").trim());
       }}
 
       function isEmailValid() {{
-        return /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(String(emailMobiInput.value || "").trim());
+        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(emailMobiInput.value || "").trim());
       }}
 
       function isCodeValid(value) {{
-        return /^\\d{{4,10}}$/.test(String(value || "").trim());
+        return /^\d{{4,10}}$/.test(String(value || "").trim());
       }}
 
       function cleanupCaptchaDom() {{
@@ -1439,5 +1449,13 @@ mod tests {
         let html = login_page_html("bind_login_demo123");
         assert!(html.contains("bind_login_demo123"));
         assert!(html.contains("const wechatSocketState = \"demo123\";"));
+    }
+
+    #[test]
+    fn login_page_renders_unescaped_validation_regexes() {
+        let html = login_page_html("test-state");
+        assert!(html.contains(r"/^\d{5,20}$/"));
+        assert!(html.contains(r"/^[^\s@]+@[^\s@]+\.[^\s@]+$/"));
+        assert!(html.contains(r"/^\d{4,10}$/"));
     }
 }
