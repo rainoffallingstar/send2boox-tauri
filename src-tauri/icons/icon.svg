@@ -1,15 +1,39 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#1177FF"/>
-      <stop offset="100%" stop-color="#00B7A7"/>
+    <linearGradient id="bg" x1="14%" y1="10%" x2="88%" y2="92%">
+      <stop offset="0%" stop-color="#0A84FF"/>
+      <stop offset="55%" stop-color="#4A97FF"/>
+      <stop offset="100%" stop-color="#29D988"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="24%" cy="18%" r="82%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.34"/>
+      <stop offset="46%" stop-color="#FFFFFF" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="trail" x1="18%" y1="20%" x2="84%" y2="76%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#DDF7FF"/>
     </linearGradient>
   </defs>
-  <rect x="72" y="72" width="880" height="880" rx="220" fill="url(#bg)"/>
-  <rect x="192" y="242" width="640" height="540" rx="110" fill="#FFFFFF" fill-opacity="0.18"/>
-  <path d="M286 368h208c86 0 154 66 154 148s-68 148-154 148H286V368zm190 96h-84v104h84c32 0 58-24 58-52s-26-52-58-52z" fill="#FFFFFF"/>
-  <circle cx="716" cy="516" r="146" fill="#FFFFFF"/>
-  <circle cx="716" cy="516" r="64" fill="url(#bg)"/>
-</svg>
 
+  <rect x="72" y="72" width="880" height="880" rx="228" fill="url(#bg)"/>
+  <rect x="72" y="72" width="880" height="880" rx="228" fill="url(#glow)"/>
+
+  <g transform="translate(176 188)">
+    <rect x="0" y="0" width="520" height="648" rx="128" fill="#FFFFFF" fill-opacity="0.18"/>
+    <path d="M140 112c-26 0-48 22-48 48v328c0 26 22 48 48 48h220c26 0 48-22 48-48V236L284 112H140z" fill="#FFFFFF"/>
+    <path d="M284 112v92c0 18 14 32 32 32h92L284 112z" fill="#DDF0FF"/>
+    <rect x="148" y="236" width="150" height="26" rx="13" fill="#D6E8FF"/>
+    <rect x="148" y="292" width="204" height="26" rx="13" fill="#D6E8FF"/>
+    <rect x="148" y="348" width="168" height="26" rx="13" fill="#D6E8FF"/>
+  </g>
+
+  <g transform="translate(560 296)">
+    <path d="M0 220c84-12 150-52 208-128" fill="none" stroke="url(#trail)" stroke-width="52" stroke-linecap="round"/>
+    <path d="M22 322c114-16 216-72 292-188" fill="none" stroke="#FFFFFF" stroke-opacity="0.72" stroke-width="28" stroke-linecap="round"/>
+    <circle cx="292" cy="32" r="54" fill="#FFFFFF"/>
+    <circle cx="188" cy="126" r="32" fill="#FFFFFF" fill-opacity="0.94"/>
+    <circle cx="94" cy="214" r="22" fill="#FFFFFF" fill-opacity="0.86"/>
+  </g>
+</svg>

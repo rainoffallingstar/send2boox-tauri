@@ -18,6 +18,7 @@
 # Rust / Tauri build outputs
 target/
 src-tauri/target/
+.build-cache.noindex/
 
 # Cargo / rust backup
 **/*.rs.bk

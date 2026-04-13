@@ -706,6 +706,18 @@ h2 {
   filter: brightness(1.05);
 }
 
+.btn[disabled],
+.push-action[disabled] {
+  cursor: wait;
+  opacity: 0.7;
+  filter: saturate(0.85);
+}
+
+.btn[disabled]:active,
+.push-action[disabled]:active {
+  transform: none;
+}
+
 .btn-primary {
   color: #fff;
   background: linear-gradient(135deg, #0a84ff 0%, #48a7ff 58%, #6ab7ff 100%);

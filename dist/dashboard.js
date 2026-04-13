@@ -1,49 +1,60 @@
-function createInvoke() {
+function createIpcInvoke() {
+  return (cmd, args = {}) =>
+    new Promise((resolve, reject) => {
+      const cb = `_${Math.random().toString(36).slice(2)}`;
+      const err = `_${Math.random().toString(36).slice(2)}`;
+      Object.defineProperty(window, cb, {
+        value: (result) => {
+          try {
+            resolve(result);
+          } finally {
+            Reflect.deleteProperty(window, cb);
+            Reflect.deleteProperty(window, err);
+          }
+        },
+        configurable: true
+      });
+      Object.defineProperty(window, err, {
+        value: (error) => {
+          try {
+            reject(error);
+          } finally {
+            Reflect.deleteProperty(window, cb);
+            Reflect.deleteProperty(window, err);
+          }
+        },
+        configurable: true
+      });
+      window.__TAURI_IPC__({
+        cmd,
+        callback: cb,
+        error: err,
+        payload: args
+      });
+    });
+}
+
+function resolveInvoke() {
+  if (window.__TAURI__?.core?.invoke) {
+    return window.__TAURI__.core.invoke;
+  }
+  if (window.__TAURI__?.invoke) {
+    return window.__TAURI__.invoke;
+  }
   if (window.__TAURI__?.tauri?.invoke) {
     return window.__TAURI__.tauri.invoke;
   }
   if (typeof window.__TAURI_INVOKE__ === "function") {
     return window.__TAURI_INVOKE__;
   }
+  if (typeof window.__TAURI_INTERNALS__?.invoke === "function") {
+    return window.__TAURI_INTERNALS__.invoke;
+  }
   if (typeof window.__TAURI_IPC__ === "function") {
-    return (cmd, args = {}) =>
-      new Promise((resolve, reject) => {
-        const cb = `_${Math.random().toString(36).slice(2)}`;
-        const err = `_${Math.random().toString(36).slice(2)}`;
-        Object.defineProperty(window, cb, {
-          value: (result) => {
-            try {
-              resolve(result);
-            } finally {
-              Reflect.deleteProperty(window, cb);
-              Reflect.deleteProperty(window, err);
-            }
-          },
-          configurable: true
-        });
-        Object.defineProperty(window, err, {
-          value: (error) => {
-            try {
-              reject(error);
-            } finally {
-              Reflect.deleteProperty(window, cb);
-              Reflect.deleteProperty(window, err);
-            }
-          },
-          configurable: true
-        });
-        window.__TAURI_IPC__({
-          cmd,
-          callback: cb,
-          error: err,
-          payload: args
-        });
-      });
+    return createIpcInvoke();
   }
   return null;
 }
-
-const invoke = createInvoke();
 
 const state = {
   timer: null,
@@ -53,10 +64,13 @@ const state = {
   pendingForce: false,
   authTimer: null,
   authTimerTicks: 0,
-  refreshMs: 60000
+  refreshMs: 60000,
+  uploadStatusOverride: "",
+  uploadStatusOverrideUntil: 0
 };
 
 function invokeWithTimeout(command, args = {}, timeoutMs = 12000) {
+  const invoke = resolveInvoke();
   if (!invoke) {
     return Promise.reject(new Error("当前环境不支持 Tauri invoke"));
   }
@@ -157,6 +171,42 @@ function computeWeekTotalTime(readTimeWeek) {
 function setText(id, value) {
   const el = document.getElementById(id);
   if (el) el.textContent = value;
+}
+
+function setUploadStatusOverride(value, holdMs = 0) {
+  state.uploadStatusOverride = value || "";
+  state.uploadStatusOverrideUntil = holdMs > 0 ? Date.now() + holdMs : 0;
+  if (value) {
+    setText("upload-status", value);
+  }
+}
+
+function clearUploadStatusOverride() {
+  state.uploadStatusOverride = "";
+  state.uploadStatusOverrideUntil = 0;
+}
+
+function getVisibleUploadStatus(snapshotStatus) {
+  const now = Date.now();
+  const overrideActive =
+    !!state.uploadStatusOverride && now < Number(state.uploadStatusOverrideUntil || 0);
+  if (!overrideActive) {
+    clearUploadStatusOverride();
+    return snapshotStatus;
+  }
+  if (snapshotStatus === "上传进度: 空闲" || snapshotStatus === "上传进度: 等待选择文件...") {
+    return state.uploadStatusOverride;
+  }
+  clearUploadStatusOverride();
+  return snapshotStatus;
+}
+
+function scheduleSnapshotRefresh(delays, force = true) {
+  (Array.isArray(delays) ? delays : []).forEach((delay) => {
+    const ms = Number(delay);
+    if (!Number.isFinite(ms) || ms < 0) return;
+    setTimeout(() => loadSnapshot(force), ms);
+  });
 }
 
 async function refreshCard(cardEl) {
@@ -334,7 +384,7 @@ function renderSnapshot(snapshot) {
   setText("metric-total-read", numberText(readingInfo.read));
   setText("metric-total-finished", numberText(readingInfo.finished));
 
-  const uploadText = upload.status_text || "上传进度: 空闲";
+  const uploadText = getVisibleUploadStatus(upload.status_text || "上传进度: 空闲");
   setText("upload-status", uploadText);
   const upPercent = Number(upload.progress_percent);
   const uploadPercent = Number.isFinite(upPercent) ? Math.max(0, Math.min(100, upPercent)) : 0;
@@ -353,7 +403,7 @@ function renderSnapshot(snapshot) {
   const loginBtn = document.getElementById("login-btn");
   if (loginBtn) {
     loginBtn.disabled = !!auth.authorized;
-    loginBtn.textContent = auth.authorized ? "已授权" : "登录并授权";
+    loginBtn.textContent = auth.authorized ? "已授权" : "浏览器登录";
   }
 
   if (auth.authorized && state.authTimer) {
@@ -364,6 +414,7 @@ function renderSnapshot(snapshot) {
 }
 
 async function loadSnapshot(force = false) {
+  const invoke = resolveInvoke();
   if (state.loading) {
     state.pendingForce = state.pendingForce || force;
     return;
@@ -403,10 +454,6 @@ function bindActions() {
     });
   });
 
-  document.getElementById("open-main-btn")?.addEventListener("click", async () => {
-    await invokeWithTimeout("dashboard_open_main", { page: "recent" }, 6000);
-  });
-
   document.getElementById("refresh-btn")?.addEventListener("click", async () => {
     await loadSnapshot(true);
   });
@@ -433,7 +480,7 @@ function bindActions() {
   });
 
   document.getElementById("login-btn")?.addEventListener("click", async () => {
-    setText("auth-status", "请在主页面完成登录，完成后会自动回到仪表盘");
+    setText("auth-status", "默认浏览器已打开登录方式选择页，请选择微信扫码或 BOOX 助手扫码完成授权");
     await invokeWithTimeout("dashboard_login_authorize", {}, 6000);
     if (state.authTimer) {
       clearInterval(state.authTimer);
@@ -449,17 +496,39 @@ function bindActions() {
     }, 1200);
   });
 
-  document.getElementById("upload-btn")?.addEventListener("click", async () => {
-    setText("upload-status", "上传进度: 等待选择文件...");
-    invokeWithTimeout("dashboard_upload_pick_and_send", {}, 10000).catch((err) => {
+  document.getElementById("upload-btn")?.addEventListener("click", async (event) => {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLButtonElement)) return;
+    if (target.disabled) return;
+
+    const originalText = target.textContent || "上传文件";
+    target.disabled = true;
+    target.textContent = "打开中...";
+    setUploadStatusOverride("上传进度: 正在打开文件选择窗口，请检查系统弹窗", 12000);
+
+    try {
+      await invokeWithTimeout("dashboard_upload_pick_and_send", {}, 10000);
+      setUploadStatusOverride(
+        "上传进度: 文件选择窗口已唤起，请在系统弹窗中选择文件；若为 mobi/azw3 将自动转换为 EPUB",
+        16000
+      );
+      scheduleSnapshotRefresh([250, 900, 1800, 3600, 7000, 12000, 18000], true);
+    } catch (err) {
+      clearUploadStatusOverride();
       setText("upload-status", `上传入口失败: ${String(err)}`);
-    });
-    setTimeout(() => loadSnapshot(true), 1200);
+      scheduleSnapshotRefresh([300], true);
+    } finally {
+      setTimeout(() => {
+        target.disabled = false;
+        target.textContent = originalText;
+      }, 1200);
+    }
   });
 
   document.getElementById("push-list")?.addEventListener("click", async (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) return;
+    const target = event.target?.closest("button[data-action]");
+    if (!(target instanceof HTMLButtonElement)) return;
+    if (target.disabled) return;
     const action = target.dataset.action;
     if (!action) return;
     const row = target.closest(".push-item");
@@ -467,26 +536,34 @@ function bindActions() {
     const id = row.dataset.pushId;
     if (!id) return;
 
-    target.setAttribute("disabled", "true");
+    const originalText = target.textContent || (action === "resend" ? "推送" : "删除");
+    target.disabled = true;
+    target.textContent = action === "resend" ? "推送中..." : "删除中...";
     try {
       if (action === "resend") {
+        setUploadStatusOverride("上传进度: 正在重新推送文件到设备，请稍候...", 12000);
         const snapshot = await invokeWithTimeout("dashboard_push_resend", { id }, 20000);
         if (snapshot) renderSnapshot(snapshot);
+        setUploadStatusOverride("上传进度: 已提交重新推送，正在刷新状态...", 6000);
+        scheduleSnapshotRefresh([500, 1800, 4000], true);
       } else if (action === "delete") {
         const ok = window.confirm("确定删除这条推送记录吗？");
         if (!ok) return;
         removePushItemLocally(id);
-        setText("upload-status", "删除中...");
+        setUploadStatusOverride("上传进度: 正在删除推送记录...", 6000);
         const snapshot = await invokeWithTimeout("dashboard_push_delete", { id }, 12000);
         if (snapshot) renderSnapshot(snapshot);
+        setUploadStatusOverride("上传进度: 推送记录已删除", 3000);
       }
     } catch (err) {
+      clearUploadStatusOverride();
       setText("upload-status", `操作失败: ${String(err)}`);
       if (action === "delete") {
         setTimeout(() => loadSnapshot(true), 120);
       }
     } finally {
-      target.removeAttribute("disabled");
+      target.disabled = false;
+      target.textContent = originalText;
       if (action === "resend") {
         setTimeout(() => loadSnapshot(false), 400);
       }
@@ -494,6 +571,7 @@ function bindActions() {
   });
 
   document.getElementById("lan-device-list")?.addEventListener("click", async (event) => {
+    const invoke = resolveInvoke();
     const target = event.target;
     if (!(target instanceof HTMLButtonElement)) return;
     if (target.disabled) return;
