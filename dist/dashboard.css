@@ -714,6 +714,239 @@ input {
   word-break: break-word;
 }
 
+.zotero-note {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.zotero-view {
+  min-height: 0;
+}
+
+.zotero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.zotero-connection-card {
+  min-height: 0;
+}
+
+.zotero-panel-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.zotero-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.zotero-status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.zotero-chip {
+  font-weight: 560;
+}
+
+.zotero-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.zotero-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.zotero-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.zotero-field-meta {
+  font-size: 12px;
+  color: var(--subtle);
+}
+
+.zotero-inline-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.zotero-form input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--text);
+  outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.zotero-form input:focus {
+  border-color: rgba(10, 132, 255, 0.35);
+  box-shadow: 0 0 0 4px rgba(10, 132, 255, 0.12);
+}
+
+.zotero-workflow-card {
+  min-height: 0;
+}
+
+.zotero-workflow-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+  gap: 14px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(247, 248, 250, 0.88);
+  border: 1px solid rgba(44, 51, 64, 0.06);
+}
+
+.zotero-workflow-toolbar-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.zotero-workflow-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.zotero-search-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.zotero-search-field input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--text);
+  outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.zotero-search-field input:focus {
+  border-color: rgba(10, 132, 255, 0.35);
+  box-shadow: 0 0 0 4px rgba(10, 132, 255, 0.12);
+}
+
+.zotero-workflow-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.zotero-attachment-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(44, 51, 64, 0.06);
+}
+
+.zotero-attachment-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.zotero-attachment-row.empty {
+  justify-content: flex-start;
+}
+
+.zotero-attachment-main {
+  min-width: 0;
+}
+
+.zotero-item-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.zotero-item-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid rgba(44, 51, 64, 0.06);
+  padding-bottom: 12px;
+}
+
+.zotero-item-card-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.zotero-item-card-side {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.zotero-count-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgba(44, 51, 64, 0.08);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.zotero-count-pill.is-ready {
+  color: var(--success);
+  border-color: rgba(22, 123, 69, 0.16);
+  background: rgba(52, 199, 89, 0.1);
+}
+
+.zotero-item-card-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.empty-card.compact {
+  padding: 12px 4px;
+}
+
 .empty-card {
   padding: 22px 18px;
   text-align: center;
@@ -784,6 +1017,28 @@ input {
   .toolbar-actions {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .zotero-workflow-toolbar,
+  .zotero-inline-field,
+  .zotero-attachment-row,
+  .zotero-item-card-head,
+  .zotero-field-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .zotero-workflow-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .zotero-inline-field {
+    grid-template-columns: 1fr;
+  }
+
+  .zotero-panel-body {
+    overflow: visible;
+    padding-right: 0;
   }
 
   .content-root {

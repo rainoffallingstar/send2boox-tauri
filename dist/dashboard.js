@@ -69,13 +69,23 @@ const VIEW_META = {
     subtitle: "聚合今日阅读、本周时长和累计阅读完成情况。",
     badge: "Reading"
   },
-  account: {
-    kicker: "账户",
-    title: "账户与授权",
-    subtitle: "查看授权状态、云空间使用情况与基础账户信息。",
-    badge: "Account"
+  zotero: {
+    kicker: "Zotero",
+    title: "Zotero 附件工作流",
+    subtitle: "查看最近文献附件、按需推送，并在缺失本地文件时走 WebDAV 拉取链路。",
+    badge: "Zotero"
   }
 };
+
+function createZoteroForm() {
+  return {
+    profileDir: "",
+    dataDir: "",
+    webdavUrl: "",
+    webdavUsername: "",
+    webdavPassword: ""
+  };
+}
 
 const state = {
   timer: null,
@@ -88,7 +98,19 @@ const state = {
   refreshMs: 60000,
   uploadStatusOverride: "",
   uploadStatusOverrideUntil: 0,
-  activeView: "overview"
+  activeView: "overview",
+  zotero: {
+    status: null,
+    items: [],
+    loadingStatus: false,
+    loadingItems: false,
+    pushingAttachmentId: null,
+    phase: "idle",
+    phaseError: "",
+    form: createZoteroForm(),
+    detected: null,
+    filterText: ""
+  }
 };
 
 function $(id) {
@@ -183,6 +205,349 @@ function timeAgoText(ts) {
   if (diff < 60) return `${diff}s 前`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m 前`;
   return `${Math.floor(diff / 3600)}h 前`;
+}
+
+function zoteroStateText(raw) {
+  if (raw === "connected") return "已连接";
+  if (raw === "pending") return "待补全";
+  if (raw === "failed") return "失败";
+  if (raw === "detecting") return "检测中";
+  if (raw === "validating") return "验证中";
+  return "未检测";
+}
+
+function missingFieldText(key) {
+  if (key === "profile_dir") return "缺少 profile 目录";
+  if (key === "data_dir") return "缺少 dataDir 或 zotero.sqlite";
+  if (key === "webdav_protocol") return "当前协议不是 WebDAV";
+  if (key === "webdav_url") return "缺少 WebDAV 地址";
+  if (key === "webdav_username") return "缺少 WebDAV 用户名";
+  if (key === "webdav_password") return "缺少 WebDAV 密码";
+  return key || "-";
+}
+
+function formatZoteroStateNote(status) {
+  if (!status) return "尚未检测 Zotero 配置。";
+  if (state.zotero.phase === "detecting") return "正在自动检测 Zotero profile、dataDir 和 WebDAV 配置。";
+  if (state.zotero.phase === "validating") return "正在验证 WebDAV 凭据并保存到系统安全存储。";
+  if (state.zotero.phaseError) return state.zotero.phaseError;
+  const missing = Array.isArray(status.missing_fields) ? status.missing_fields : [];
+  if (missing.length > 0) {
+    return `待补全: ${missing.map(missingFieldText).join("，")}`;
+  }
+  if (status.last_error) return status.last_error;
+  if (status.state === "connected") return "Zotero 本地库和 WebDAV 凭据都已就绪，可直接进入附件工作流。";
+  return "可以先自动检测，再补全缺失配置。";
+}
+
+function syncZoteroFormFromStatus(status, options = {}) {
+  const preservePassword = options.preservePassword !== false;
+  const summary = status?.summary || {};
+  const next = createZoteroForm();
+  next.profileDir = summary.profile_dir || "";
+  next.dataDir = summary.data_dir || "";
+  next.webdavUrl = summary.webdav_url || "";
+  next.webdavUsername = summary.webdav_username || "";
+  if (preservePassword) {
+    next.webdavPassword = state.zotero.form.webdavPassword || "";
+  }
+  state.zotero.form = next;
+}
+
+function buildZoteroStatusRows(status) {
+  const summary = status?.summary || {};
+  const rows = [
+    ["状态", zoteroStateText(state.zotero.phase === "detecting" ? "detecting" : state.zotero.phase === "validating" ? "validating" : status?.state)],
+    ["Profile", summary.profile_dir || "未检测到"],
+    ["Data Dir", summary.data_dir || "未检测到"],
+    ["数据库", summary.database_exists ? summary.database_path || "已找到" : "未找到 zotero.sqlite"],
+    ["协议", summary.protocol || "未检测到"],
+    ["WebDAV 地址", summary.webdav_url || "未检测到"],
+    ["WebDAV 用户名", summary.webdav_username || "未检测到"],
+    ["密码", summary.password_saved ? "已保存在系统安全存储" : "尚未保存"],
+    ["下载模式", summary.download_mode_personal || "未知"]
+  ];
+  return rows
+    .map(
+      ([label, value]) => `
+        <div class="account-row">
+          <p class="account-key">${escapeHtml(label)}</p>
+          <p class="account-value">${escapeHtml(String(value || "-"))}</p>
+        </div>
+      `
+    )
+    .join("");
+}
+
+function buildZoteroStatusChips(status) {
+  const summary = status?.summary || {};
+  const chips = [
+    `状态: ${zoteroStateText(state.zotero.phase === "detecting" ? "detecting" : state.zotero.phase === "validating" ? "validating" : status?.state)}`,
+    `数据库: ${summary.database_exists ? "已找到" : "未找到"}`,
+    `协议: ${summary.protocol || "未检测到"}`,
+    `密码: ${summary.password_saved ? "已保存" : "待补全"}`
+  ];
+  return chips
+    .map((text) => `<span class="status-chip pending zotero-chip">${escapeHtml(text)}</span>`)
+    .join("");
+}
+
+function detectionSourceText(key) {
+  const detected = state.zotero.detected || {};
+  if (key === "profileDir") return detected.profile_source || "";
+  if (key === "dataDir") return detected.data_dir_source || "";
+  if (key === "webdavUrl") return detected.webdav_url_source || "";
+  if (key === "webdavUsername") return detected.webdav_username_source || "";
+  return "";
+}
+
+function fieldStatusText(key, status) {
+  const summary = status?.summary || {};
+  if (key === "profileDir") return summary.profile_dir ? "已检测到" : "未检测到";
+  if (key === "dataDir") return summary.database_exists ? "数据库已就绪" : "请补全 dataDir";
+  if (key === "webdavUrl") return summary.webdav_url ? "已检测到" : "待补全";
+  if (key === "webdavUsername") return summary.webdav_username ? "已检测到" : "待补全";
+  if (key === "webdavPassword") return summary.password_saved ? "系统安全存储中已有密码" : "输入后保存到系统安全存储";
+  return "";
+}
+
+function buildEditableField({ label, field, type = "text", value, placeholder, actionHtml = "", status }) {
+  const source = detectionSourceText(field);
+  const fieldStatus = fieldStatusText(field, status);
+  return `
+    <label class="zotero-field">
+      <span class="zotero-field-head">
+        <span>${escapeHtml(label)}</span>
+        <span class="zotero-field-meta">${escapeHtml(source || fieldStatus || "")}</span>
+      </span>
+      <div class="zotero-inline-field">
+        <input data-zotero-field="${escapeHtml(field)}" type="${escapeHtml(type)}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" />
+        ${actionHtml}
+      </div>
+    </label>
+  `;
+}
+
+function buildZoteroConnectionCard(options = {}) {
+  const embedded = options.embedded === true;
+  const status = state.zotero.status;
+  const form = state.zotero.form;
+  const note = formatZoteroStateNote(status);
+  const connected = status?.state === "connected";
+
+  return `
+    <section class="panel-card soft zotero-connection-card">
+      <div class="panel-header">
+        <div>
+          <h3>Zotero 连接与补全</h3>
+          <p>${embedded ? "检测结果直接落到当前字段里，可在这里确认、补全并保存。" : "检测结果直接写入当前字段，你可以原地确认和编辑。"}</p>
+        </div>
+        <div class="section-actions">
+          <button class="button button-tertiary button-xs" data-action="zotero-detect" type="button" ${state.zotero.loadingStatus ? "disabled" : ""}>自动检测</button>
+          <button class="button button-tertiary button-xs" data-action="zotero-redetect" type="button" ${state.zotero.loadingStatus ? "disabled" : ""}>重新检测</button>
+        </div>
+      </div>
+      <div class="zotero-panel-body">
+        <p class="zotero-note">${escapeHtml(note)}</p>
+        <div class="zotero-status-strip">${buildZoteroStatusChips(status)}</div>
+        <div class="zotero-form">
+          ${buildEditableField({
+            label: "Profile 目录",
+            field: "profileDir",
+            value: form.profileDir,
+            placeholder: "自动检测或手动选择 profile 目录",
+            status,
+            actionHtml: `<button class="button button-tertiary button-xs" data-action="zotero-pick-profile" type="button">选择</button>`
+          })}
+          ${buildEditableField({
+            label: "Data Dir",
+            field: "dataDir",
+            value: form.dataDir,
+            placeholder: "例如 /Volumes/.../zotero",
+            status,
+            actionHtml: `<button class="button button-tertiary button-xs" data-action="zotero-pick-data" type="button">选择</button>`
+          })}
+          ${buildEditableField({
+            label: "WebDAV 地址",
+            field: "webdavUrl",
+            value: form.webdavUrl,
+            placeholder: "例如 https://example.com/webdav",
+            status
+          })}
+          ${buildEditableField({
+            label: "WebDAV 用户名",
+            field: "webdavUsername",
+            value: form.webdavUsername,
+            placeholder: "用于附件同步的用户名",
+            status
+          })}
+          ${buildEditableField({
+            label: "WebDAV 密码",
+            field: "webdavPassword",
+            type: "password",
+            value: form.webdavPassword,
+            placeholder: status?.summary?.password_saved ? "留空则继续使用已保存密码" : "输入后保存到系统安全存储",
+            status
+          })}
+          <div class="section-actions">
+            <button class="button button-primary" data-action="zotero-save" type="button" ${state.zotero.phase === "validating" ? "disabled" : ""}>保存并验证</button>
+            ${connected ? `<button class="button button-secondary" data-view-target="zotero" type="button">打开附件工作流</button>` : ""}
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function buildZoteroAttachmentActions(attachment) {
+  if (Number(attachment.link_mode) !== 0) {
+    return `<button class="button button-tertiary button-xs" type="button" disabled>暂不支持</button>`;
+  }
+  const busy = String(state.zotero.pushingAttachmentId || "") === String(attachment.attachment_item_id);
+  return `
+    <button
+      class="button button-primary button-xs"
+      data-action="zotero-push-attachment"
+      data-attachment-id="${escapeHtml(String(attachment.attachment_item_id))}"
+      type="button"
+      ${attachment.can_push_directly || attachment.can_download_from_webdav ? "" : "disabled"}
+      ${busy ? "disabled" : ""}
+    >${escapeHtml(busy ? "推送中..." : "推送")}</button>
+  `;
+}
+
+function zoteroAttachmentModeText(linkMode) {
+  if (Number(linkMode) === 0) return "stored attachment";
+  if (Number(linkMode) === 1) return "link to file";
+  if (Number(linkMode) === 2) return "imported url";
+  if (Number(linkMode) === 3) return "linked url";
+  return `link mode ${String(linkMode ?? "-")}`;
+}
+
+function zoteroAttachmentRouteText(attachment) {
+  if (Number(attachment.link_mode) !== 0) return "当前不是 stored attachment，第一版不支持直接推送。";
+  if (attachment.can_push_directly) return "本地附件已就绪，会直接走现有上传链路。";
+  if (attachment.can_download_from_webdav) return "本地缺失，推送时会先从 WebDAV 拉取临时文件。";
+  return "附件不可直接推送，请先在 Zotero 中确认本地文件或同步状态。";
+}
+
+function zoteroSearchText(item) {
+  const attachments = Array.isArray(item?.attachments) ? item.attachments : [];
+  return [
+    item?.title,
+    item?.author_summary,
+    item?.year,
+    item?.date_modified,
+    ...attachments.flatMap((attachment) => [
+      attachment?.file_name,
+      attachment?.attachment_key,
+      attachment?.content_type,
+      attachment?.status_label
+    ])
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function getZoteroItemsWithAttachments(items) {
+  const list = Array.isArray(items) ? items : [];
+  return list.filter((item) => Array.isArray(item?.attachments) && item.attachments.length > 0);
+}
+
+function getFilteredZoteroItems(items, filterText) {
+  const list = getZoteroItemsWithAttachments(items);
+  const needle = String(filterText || "").trim().toLowerCase();
+  if (!needle) return list;
+  return list.filter((item) => zoteroSearchText(item).includes(needle));
+}
+
+function buildZoteroWorkflowStats(items) {
+  const list = getZoteroItemsWithAttachments(items);
+  const attachmentCount = list.reduce((sum, item) => sum + (Array.isArray(item.attachments) ? item.attachments.length : 0), 0);
+  const pushableCount = list.reduce(
+    (sum, item) =>
+      sum +
+      (Array.isArray(item.attachments)
+        ? item.attachments.filter((attachment) => attachment.can_push_directly || attachment.can_download_from_webdav).length
+        : 0),
+    0
+  );
+  const localReadyCount = list.reduce(
+    (sum, item) =>
+      sum + (Array.isArray(item.attachments) ? item.attachments.filter((attachment) => attachment.can_push_directly).length : 0),
+    0
+  );
+  return `
+    <div class="zotero-workflow-stats">
+      <span class="zotero-count-pill">${escapeHtml(`${list.length} 条文献`)}</span>
+      <span class="zotero-count-pill">${escapeHtml(`${attachmentCount} 个附件`)}</span>
+      <span class="zotero-count-pill is-ready">${escapeHtml(`可推送 ${pushableCount}`)}</span>
+      <span class="zotero-count-pill">${escapeHtml(`本地就绪 ${localReadyCount}`)}</span>
+    </div>
+  `;
+}
+
+function buildZoteroWorkflowItems(items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return `
+      <div class="empty-card compact">
+        <h3>暂无可展示的条目</h3>
+        <p class="empty-copy">连接完成后会展示最近 50 条个人库文献及其附件状态。</p>
+      </div>
+    `;
+  }
+  return items
+    .map((item) => {
+      const attachments = Array.isArray(item.attachments) ? item.attachments : [];
+      const readyCount = attachments.filter((attachment) => attachment.can_push_directly || attachment.can_download_from_webdav).length;
+      const attachmentHtml = attachments.length
+        ? attachments
+            .map(
+              (attachment) => `
+                <div class="zotero-attachment-row">
+                  <div class="zotero-attachment-main">
+                    <p class="push-name">${escapeHtml(attachment.file_name || attachment.attachment_key || "未命名附件")}</p>
+                    <p class="push-meta">${escapeHtml([
+                      attachment.content_type || "未知类型",
+                      zoteroAttachmentModeText(attachment.link_mode),
+                      attachment.status_label || "-"
+                    ].filter(Boolean).join(" · "))}</p>
+                    <p class="inline-note">${escapeHtml(zoteroAttachmentRouteText(attachment))}</p>
+                  </div>
+                  <div class="row-actions">
+                    ${buildZoteroAttachmentActions(attachment)}
+                  </div>
+                </div>
+              `
+            )
+            .join("")
+        : `
+          <div class="zotero-attachment-row empty">
+            <div class="zotero-attachment-main">
+              <p class="push-meta">当前条目没有附件。</p>
+            </div>
+          </div>
+        `;
+      return `
+        <article class="list-item zotero-item-card">
+          <div class="zotero-item-card-head">
+            <div class="list-item-main zotero-item-card-main">
+              <p class="list-title">${escapeHtml(item.title || "未命名条目")}</p>
+              <p class="list-meta">${escapeHtml([item.author_summary, item.year, item.date_modified].filter(Boolean).join(" · ") || "最近修改条目")}</p>
+            </div>
+            <div class="zotero-item-card-side">
+              <span class="zotero-count-pill">${escapeHtml(`${attachments.length} 个附件`)}</span>
+              <span class="zotero-count-pill ${readyCount > 0 ? "is-ready" : ""}">${escapeHtml(`可推送 ${readyCount}`)}</span>
+            </div>
+          </div>
+          <div class="zotero-item-card-body">
+            ${attachmentHtml}
+          </div>
+        </article>
+      `;
+    })
+    .join("");
 }
 
 function safeNum(v) {
@@ -314,8 +679,8 @@ function renderToolbar() {
       badge = `${(snapshot.devices || []).length} 台`;
     } else if (state.activeView === "reading") {
       badge = `${computeTodayReadCount(snapshot?.calendar_metrics?.day_read_today || {})} 今日`;
-    } else if (state.activeView === "account") {
-      badge = snapshot?.auth?.authorized ? "Authorized" : "Sign In";
+    } else if (state.activeView === "zotero") {
+      badge = zoteroStateText(state.zotero.status?.state);
     } else if (state.activeView === "overview") {
       badge = snapshot?.auth?.authorized ? "Live" : "Preview";
     }
@@ -590,9 +955,6 @@ function renderOverview(snapshot) {
                 <h3>账户摘要</h3>
                 <p>当前授权状态和主要账号信息。</p>
               </div>
-              <div class="section-actions">
-                <button class="button button-tertiary button-xs" data-view-target="account" type="button">查看详情</button>
-              </div>
             </div>
             <div class="account-list">
               <div class="account-row">
@@ -611,6 +973,8 @@ function renderOverview(snapshot) {
               </div>
             </div>
           </section>
+
+          ${buildZoteroConnectionCard({ embedded: true })}
         </div>
       </div>
     </section>
@@ -869,11 +1233,79 @@ function renderAccountView(snapshot) {
   `;
 }
 
+function renderZoteroView() {
+  const status = state.zotero.status;
+  const note = formatZoteroStateNote(status);
+  const connected = status?.state === "connected";
+  const allItems = Array.isArray(state.zotero.items) ? state.zotero.items : [];
+  const filteredItems = getFilteredZoteroItems(allItems, state.zotero.filterText);
+
+  return `
+    <section class="view zotero-view">
+      <div class="zotero-grid">
+        <section class="panel-card soft zotero-panel-card zotero-workflow-card">
+          <div class="panel-header">
+            <div>
+              <h3>附件工作流</h3>
+              <p>按最近修改时间展示个人库文献与附件，统一使用“推送”动作。</p>
+            </div>
+            <div class="section-actions">
+              <button class="button button-tertiary button-xs" data-action="zotero-refresh-items" type="button" ${connected ? "" : "disabled"} ${state.zotero.loadingItems ? "disabled" : ""}>刷新列表</button>
+            </div>
+          </div>
+          <div class="zotero-panel-body">
+            <p class="zotero-note">${escapeHtml(note)}</p>
+            <div class="zotero-status-strip">${buildZoteroStatusChips(status)}</div>
+            ${connected ? `
+              <div class="zotero-workflow-toolbar">
+                <div class="zotero-workflow-toolbar-main">
+                  ${buildZoteroWorkflowStats(allItems)}
+                  <p class="inline-note">这里只展示带附件的文献。第一版仅支持 stored attachments；若本地文件缺失但远端 WebDAV 可用，推送时会按需拉取。</p>
+                </div>
+                <label class="zotero-search-field">
+                  <span>筛选条目或附件</span>
+                  <input
+                    data-zotero-search="items"
+                    type="search"
+                    value="${escapeHtml(state.zotero.filterText || "")}"
+                    placeholder="搜索标题、作者、年份、附件名"
+                  />
+                </label>
+              </div>
+              <div class="zotero-workflow-list">
+                ${state.zotero.loadingItems && allItems.length === 0 ? `
+                  <div class="empty-card compact">
+                    <h3>正在刷新 Zotero 条目</h3>
+                    <p class="empty-copy">本地库读取完成后，这里会更新最近文献与附件状态。</p>
+                  </div>
+                ` : filteredItems.length > 0 ? buildZoteroWorkflowItems(filteredItems) : `
+                  <div class="empty-card compact">
+                    <h3>没有可展示的附件条目</h3>
+                    <p class="empty-copy">换一个关键词试试，或清空筛选后查看所有带附件的文献。</p>
+                  </div>
+                `}
+              </div>
+            ` : `
+              <div class="empty-card compact">
+                <h3>等待连接完成</h3>
+                <p class="empty-copy">请先回到概览页中的“Zotero 连接与补全”，完成检测、补全并验证。</p>
+                <div class="section-actions">
+                  <button class="button button-secondary" data-view-target="overview" type="button">前往概览补全</button>
+                </div>
+              </div>
+            `}
+          </div>
+        </section>
+      </div>
+    </section>
+  `;
+}
+
 function renderCurrentView() {
   const root = contentRoot();
   if (!root) return;
   const snapshot = state.snapshot;
-  if (!snapshot) {
+  if (!snapshot && state.activeView !== "zotero") {
     root.innerHTML = `
       <section class="view">
         <div class="empty-card">
@@ -892,8 +1324,8 @@ function renderCurrentView() {
     html = renderDevicesView(snapshot);
   } else if (state.activeView === "reading") {
     html = renderReadingView(snapshot);
-  } else if (state.activeView === "account") {
-    html = renderAccountView(snapshot);
+  } else if (state.activeView === "zotero") {
+    html = renderZoteroView();
   } else {
     html = renderOverview(snapshot);
   }
@@ -1031,11 +1463,214 @@ async function openTransferFromButton(button) {
   );
 }
 
+async function loadZoteroStatus(forceItems = false) {
+  state.zotero.loadingStatus = true;
+  try {
+    const status = await invokeWithTimeout("zotero_status", {}, 10000);
+    state.zotero.status = status;
+    syncZoteroFormFromStatus(status);
+    renderToolbar();
+    renderCurrentView();
+    if (status?.state === "connected" && !state.zotero.loadingItems) {
+      await loadZoteroItems();
+    }
+  } finally {
+    state.zotero.loadingStatus = false;
+  }
+}
+
+function canAutoConnectZotero(status) {
+  return !!status &&
+    status.state !== "connected" &&
+    !state.zotero.loadingStatus &&
+    !state.zotero.loadingItems &&
+    state.zotero.phase !== "validating" &&
+    Array.isArray(status.missing_fields) &&
+    status.missing_fields.length === 0;
+}
+
+async function autoConnectZoteroIfReady(status, reason = "自动连接") {
+  if (!canAutoConnectZotero(status)) return false;
+  state.zotero.phaseError = `${reason}：检测到 Zotero 配置完整，正在自动连接...`;
+  renderCurrentView();
+  await saveZoteroConfig({ auto: true });
+  return true;
+}
+
+async function loadZoteroItems() {
+  state.zotero.loadingItems = true;
+  renderCurrentView();
+  try {
+    state.zotero.items = await invokeWithTimeout("zotero_list_recent_items", { limit: 50 }, 15000);
+  } catch (err) {
+    state.zotero.phaseError = `加载 Zotero 条目失败: ${String(err)}`;
+  } finally {
+    state.zotero.loadingItems = false;
+    renderCurrentView();
+  }
+}
+
+async function ensureZoteroData() {
+  if (!state.zotero.status) {
+    await loadZoteroStatus();
+    return;
+  }
+  if (await autoConnectZoteroIfReady(state.zotero.status, "进入 Zotero 页面")) {
+    return;
+  }
+  if (state.zotero.status?.state === "connected" && state.zotero.items.length === 0 && !state.zotero.loadingItems) {
+    await loadZoteroItems();
+    return;
+  }
+  renderCurrentView();
+}
+
+async function detectZoteroConfig() {
+  state.zotero.phase = "detecting";
+  state.zotero.phaseError = "";
+  renderToolbar();
+  renderCurrentView();
+  try {
+    const detection = await invokeWithTimeout("zotero_detect_config", {}, 12000);
+    state.zotero.detected = detection;
+    state.zotero.status = await invokeWithTimeout("zotero_status", {}, 10000);
+    syncZoteroFormFromStatus(state.zotero.status, { preservePassword: true });
+    const issues = Array.isArray(detection?.issues) && detection.issues.length > 0
+      ? `检测完成: ${detection.issues.join("，")}`
+      : "检测完成，请确认并补全缺失项。";
+    state.zotero.phaseError = issues;
+    if (await autoConnectZoteroIfReady(state.zotero.status, "自动检测完成")) {
+      return;
+    }
+    if (state.zotero.status?.state === "connected") {
+      await loadZoteroItems();
+    }
+  } catch (err) {
+    state.zotero.phaseError = `自动检测失败: ${String(err)}`;
+  } finally {
+    state.zotero.phase = "idle";
+    renderToolbar();
+    renderCurrentView();
+  }
+}
+
+async function pickZoteroDirectory(kind) {
+  state.zotero.phaseError = "";
+  renderCurrentView();
+  try {
+    const command = kind === "profile" ? "zotero_pick_profile_dir" : "zotero_pick_data_dir";
+    state.zotero.detected = await invokeWithTimeout(command, {}, 30000);
+    const status = await invokeWithTimeout("zotero_status", {}, 10000);
+    state.zotero.status = status;
+    syncZoteroFormFromStatus(status, { preservePassword: true });
+    if (await autoConnectZoteroIfReady(status, "目录补全完成")) {
+      return;
+    }
+    if (status?.state === "connected") {
+      await loadZoteroItems();
+    } else {
+      renderCurrentView();
+    }
+  } catch (err) {
+    state.zotero.phaseError = String(err);
+    renderCurrentView();
+  }
+}
+
+async function bootstrapZoteroAutoDetect() {
+  try {
+    await loadZoteroStatus();
+    const status = state.zotero.status;
+    const summary = status?.summary || {};
+    if (await autoConnectZoteroIfReady(status, "启动时")) {
+      return;
+    }
+    const shouldDetect =
+      !status ||
+      status.state === "undetected" ||
+      (!summary.profile_dir && !summary.data_dir && !summary.webdav_url);
+    if (shouldDetect) {
+      await detectZoteroConfig();
+    }
+  } catch (err) {
+    state.zotero.phaseError = `启动时检测 Zotero 失败: ${String(err)}`;
+    if (state.activeView === "zotero") {
+      renderCurrentView();
+    }
+  }
+}
+
+async function saveZoteroConfig(options = {}) {
+  const auto = options.auto === true;
+  state.zotero.phase = "validating";
+  state.zotero.phaseError = "";
+  setUploadStatusOverride(auto ? "上传进度: 正在自动连接 Zotero..." : "上传进度: 正在保存并验证 Zotero 配置...", 10000);
+  renderToolbar();
+  renderCurrentView();
+  try {
+    const status = await invokeWithTimeout(
+      "zotero_save_and_validate",
+      {
+        input: {
+          profile_dir: state.zotero.form.profileDir || null,
+          data_dir: state.zotero.form.dataDir || null,
+          webdav_url: state.zotero.form.webdavUrl || null,
+          webdav_username: state.zotero.form.webdavUsername || null,
+          webdav_password: state.zotero.form.webdavPassword || null
+        }
+      },
+      20000
+    );
+    state.zotero.status = status;
+    syncZoteroFormFromStatus(status, { preservePassword: false });
+    if (status?.state === "connected") {
+      state.zotero.phaseError = auto ? "Zotero 已自动连接。" : "Zotero 连接已就绪。";
+      setUploadStatusOverride(auto ? "上传进度: Zotero 已自动连接" : "上传进度: Zotero 配置验证完成", 4000);
+      await loadZoteroItems();
+    } else {
+      state.zotero.phaseError = formatZoteroStateNote(status);
+    }
+  } catch (err) {
+    state.zotero.phaseError = auto ? `自动连接失败: ${String(err)}` : `保存或验证失败: ${String(err)}`;
+  } finally {
+    state.zotero.phase = "idle";
+    renderToolbar();
+    renderCurrentView();
+  }
+}
+
+async function pushZoteroAttachment(attachmentId) {
+  state.zotero.pushingAttachmentId = attachmentId;
+  state.zotero.phaseError = "";
+  setUploadStatusOverride("上传进度: 正在提交 Zotero 附件推送...", 10000);
+  renderCurrentView();
+  try {
+    const snapshot = await invokeWithTimeout(
+      "zotero_push_attachment",
+      { attachmentItemId: Number(attachmentId) },
+      120000
+    );
+    if (snapshot) renderSnapshot(snapshot);
+    await loadZoteroItems();
+    setUploadStatusOverride("上传进度: Zotero 附件推送完成", 5000);
+  } catch (err) {
+    state.zotero.phaseError = `推送失败: ${String(err)}`;
+    $("sidebar-upload-status").textContent = `推送失败: ${String(err)}`;
+    renderCurrentView();
+  } finally {
+    state.zotero.pushingAttachmentId = null;
+    renderCurrentView();
+  }
+}
+
 function bindActions() {
   document.addEventListener("click", async (event) => {
     const navButton = event.target?.closest(".nav-item[data-view]");
     if (navButton instanceof HTMLButtonElement) {
       setActiveView(navButton.dataset.view || "overview");
+      if ((navButton.dataset.view || "overview") === "zotero") {
+        await ensureZoteroData();
+      }
       return;
     }
 
@@ -1110,8 +1745,56 @@ function bindActions() {
       }
       if (action === "open-transfer") {
         await openTransferFromButton(actionButton);
+        return;
+      }
+      if (action === "zotero-detect" || action === "zotero-redetect") {
+        await detectZoteroConfig();
+        return;
+      }
+      if (action === "zotero-pick-profile") {
+        await pickZoteroDirectory("profile");
+        return;
+      }
+      if (action === "zotero-pick-data") {
+        await pickZoteroDirectory("data");
+        return;
+      }
+      if (action === "zotero-save") {
+        await saveZoteroConfig();
+        return;
+      }
+      if (action === "zotero-refresh-items") {
+        await loadZoteroItems();
+        return;
+      }
+      if (action === "zotero-push-attachment") {
+        await pushZoteroAttachment(actionButton.dataset.attachmentId || "");
+        return;
       }
     }
+  });
+
+  document.addEventListener("input", (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    const zoteroSearch = input.dataset.zoteroSearch;
+    if (zoteroSearch === "items") {
+      const selectionStart = input.selectionStart;
+      const selectionEnd = input.selectionEnd;
+      state.zotero.filterText = input.value;
+      renderCurrentView();
+      const nextInput = document.querySelector('input[data-zotero-search="items"]');
+      if (nextInput instanceof HTMLInputElement) {
+        nextInput.focus();
+        if (Number.isInteger(selectionStart) && Number.isInteger(selectionEnd)) {
+          nextInput.setSelectionRange(selectionStart, selectionEnd);
+        }
+      }
+      return;
+    }
+    const field = input.dataset.zoteroField;
+    if (!field) return;
+    state.zotero.form[field] = input.value;
   });
 
   $("sidebar-login-btn")?.addEventListener("click", beginLoginAuthorization);
@@ -1163,7 +1846,16 @@ document.addEventListener("DOMContentLoaded", () => {
   applyRefreshIntervalMinutes(getInitialRefreshMinutes());
   bindActions();
   setTimeout(() => loadSnapshot(true), 120);
+  setTimeout(() => bootstrapZoteroAutoDetect(), 180);
+  if (state.activeView === "zotero") {
+    setTimeout(() => ensureZoteroData(), 260);
+  }
   window.addEventListener("focus", () => loadSnapshot(true));
+  window.addEventListener("focus", () => {
+    if (state.activeView === "zotero") {
+      ensureZoteroData();
+    }
+  });
   window.addEventListener("beforeunload", () => {
     if (state.timer) {
       clearInterval(state.timer);

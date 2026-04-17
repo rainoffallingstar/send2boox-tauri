@@ -10,6 +10,7 @@ mod models;
 mod push;
 mod state;
 mod util;
+mod zotero;
 
 fn main() {
     app::run();

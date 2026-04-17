@@ -131,6 +131,89 @@ pub struct DashboardSnapshot {
     pub fetched_at_ms: u128,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ZoteroConnectionSummary {
+    pub profile_dir: Option<String>,
+    pub data_dir: Option<String>,
+    pub database_path: Option<String>,
+    pub database_exists: bool,
+    pub webdav_url: Option<String>,
+    pub webdav_username: Option<String>,
+    pub protocol: Option<String>,
+    pub protocol_is_webdav: bool,
+    pub webdav_verified: bool,
+    pub password_saved: bool,
+    pub download_mode_personal: Option<String>,
+    pub download_mode_groups: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ZoteroDetectionResult {
+    pub profile_dir: Option<String>,
+    pub profile_source: Option<String>,
+    pub data_dir: Option<String>,
+    pub data_dir_source: Option<String>,
+    pub database_path: Option<String>,
+    pub database_exists: bool,
+    pub webdav_url: Option<String>,
+    pub webdav_url_source: Option<String>,
+    pub webdav_username: Option<String>,
+    pub webdav_username_source: Option<String>,
+    pub protocol: Option<String>,
+    pub protocol_source: Option<String>,
+    pub protocol_is_webdav: bool,
+    pub webdav_verified: bool,
+    pub download_mode_personal: Option<String>,
+    pub download_mode_groups: Option<String>,
+    pub has_saved_password: bool,
+    pub detected_at_ms: Option<u128>,
+    pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ZoteroConnectionState {
+    pub state: String,
+    pub missing_fields: Vec<String>,
+    pub summary: ZoteroConnectionSummary,
+    pub detected_at_ms: Option<u128>,
+    pub validated_at_ms: Option<u128>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ZoteroAttachmentSummary {
+    pub attachment_item_id: i64,
+    pub attachment_key: String,
+    pub file_name: Option<String>,
+    pub content_type: Option<String>,
+    pub link_mode: i64,
+    pub local_exists: bool,
+    pub local_path: Option<String>,
+    pub can_push_directly: bool,
+    pub can_download_from_webdav: bool,
+    pub status_label: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ZoteroItemSummary {
+    pub item_id: i64,
+    pub item_key: String,
+    pub title: String,
+    pub author_summary: Option<String>,
+    pub year: Option<String>,
+    pub date_modified: String,
+    pub attachments: Vec<ZoteroAttachmentSummary>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ZoteroSaveInput {
+    pub profile_dir: Option<String>,
+    pub data_dir: Option<String>,
+    pub webdav_url: Option<String>,
+    pub webdav_username: Option<String>,
+    pub webdav_password: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ShareTransferDevice {
     pub model: Option<String>,

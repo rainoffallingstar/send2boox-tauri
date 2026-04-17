@@ -477,7 +477,14 @@ pub fn run() {
             crate::push::dashboard_open_transfer_host,
             crate::push::dashboard_push_resend,
             crate::push::dashboard_push_delete,
-            crate::dashboard::dashboard_hide
+            crate::dashboard::dashboard_hide,
+            crate::zotero::zotero_status,
+            crate::zotero::zotero_detect_config,
+            crate::zotero::zotero_pick_profile_dir,
+            crate::zotero::zotero_pick_data_dir,
+            crate::zotero::zotero_save_and_validate,
+            crate::zotero::zotero_list_recent_items,
+            crate::zotero::zotero_push_attachment
         ])
         .setup(|app| {
             let app_handle = app.app_handle();

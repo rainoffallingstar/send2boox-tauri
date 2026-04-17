@@ -54,6 +54,13 @@ struct PreparedUploadFile {
     upload_path: PathBuf,
 }
 
+struct UploadExecutionSummary {
+    success: usize,
+    failed: usize,
+    errors: Vec<String>,
+    warnings: Vec<String>,
+}
+
 impl PreparedUploadFile {
     fn file_name(&self) -> Result<&str, String> {
         self.upload_path
@@ -480,270 +487,301 @@ fn wait_for_remote_push_doc_resend_ready(
     Err(last_err.unwrap_or_else(|| "推送消息未能及时同步到 neocloud".to_string()))
 }
 
-fn run_native_upload_task(app: tauri::AppHandle, files: Vec<PathBuf>) {
-    thread::spawn(move || {
-        let result = (|| -> Result<(usize, usize, Vec<String>, Vec<String>), String> {
-            set_upload_progress_label(&app, "上传进度: 校验会话...");
-            let client = create_client(600)?;
-            let (auth, _) = fetch_auth_context_and_user(&app, &client)
-                .map_err(|err| format!("当前会话未授权，请先点击“登录并授权”\n\n详情: {err}"))?;
-            validate_storage_quota(&auth, &files)?;
-            let total = files.len();
-            let (bucket_key, bucket_cfg) = fetch_default_bucket(&client)?;
-            let sts = fetch_sts_for_auth(&client, &auth)?;
+fn perform_native_uploads(
+    app: &tauri::AppHandle,
+    files: &[PathBuf],
+) -> Result<UploadExecutionSummary, String> {
+    set_upload_progress_label(app, "上传进度: 校验会话...");
+    let client = create_client(600)?;
+    let (auth, _) = fetch_auth_context_and_user(app, &client)
+        .map_err(|err| format!("当前会话未授权，请先点击“登录并授权”\n\n详情: {err}"))?;
+    validate_storage_quota(&auth, files)?;
+    let total = files.len();
+    let (bucket_key, bucket_cfg) = fetch_default_bucket(&client)?;
+    let sts = fetch_sts_for_auth(&client, &auth)?;
 
-            let mut success = 0usize;
-            let mut failed = 0usize;
-            let mut uploaded_size = 0u64;
-            let mut errors = Vec::new();
-            let warnings = Vec::new();
+    let mut success = 0usize;
+    let mut failed = 0usize;
+    let mut uploaded_size = 0u64;
+    let mut errors = Vec::new();
+    let warnings = Vec::new();
 
-            for (index, file) in files.iter().enumerate() {
-                let seq = index + 1;
-                set_upload_progress_label(&app, &format!("上传进度: {seq}/{total} 准备中"));
-                let prepared = match prepare_upload_file(file) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        failed += 1;
-                        errors.push(err);
-                        continue;
-                    }
-                };
-                let metadata = match fs::metadata(&prepared.upload_path) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        failed += 1;
-                        errors.push(format!(
-                            "{}: 读取文件元信息失败: {}",
-                            prepared.source_label(),
-                            err
-                        ));
-                        prepared.cleanup();
-                        continue;
-                    }
-                };
-                if !metadata.is_file() {
-                    failed += 1;
-                    errors.push(format!("{}: 不是普通文件", prepared.source_label()));
-                    prepared.cleanup();
-                    continue;
-                }
-                if metadata.len() > MAX_SINGLE_UPLOAD_BYTES {
-                    failed += 1;
-                    errors.push(format!("{}: 文件超过 200MB 上限", prepared.source_label()));
-                    prepared.cleanup();
-                    continue;
-                }
-                if let Err(err) =
-                    validate_storage_quota_for_size(&auth, uploaded_size, metadata.len())
-                {
-                    failed += 1;
-                    errors.push(format!("{}: {}", prepared.source_label(), err));
-                    prepared.cleanup();
-                    continue;
-                }
-                let file_name = match prepared.file_name() {
-                    Ok(value) => value.to_string(),
-                    Err(err) => {
-                        failed += 1;
-                        errors.push(err);
-                        prepared.cleanup();
-                        continue;
-                    }
-                };
-                let (object_key, resource_type) =
-                    build_object_key(&auth.uid, &prepared.upload_path);
-                let file_size = metadata.len();
-                set_upload_progress_label(&app, &format!("上传进度: {seq}/{total} 上传中"));
-                update_upload_runtime_state(&app, |state| {
-                    state.current_file = Some(file_name.clone());
-                    state.bytes_sent = Some(0);
-                    state.bytes_total = Some(file_size);
-                    state.progress_percent = Some(0.0);
-                    state.speed_bps = Some(0.0);
-                    state.eta_seconds = None;
-                });
-                let app_for_progress = app.clone();
-                let file_name_for_progress = file_name.clone();
-                if let Err(err) = upload_to_oss(
-                    &client,
-                    &bucket_cfg,
-                    &sts,
-                    &object_key,
-                    &prepared.upload_path,
-                    move |sent, total_bytes, elapsed| {
-                        let speed = if elapsed.as_secs_f64() > 0.001 {
-                            sent as f64 / elapsed.as_secs_f64()
-                        } else {
-                            0.0
-                        };
-                        update_upload_transfer_metrics(
-                            &app_for_progress,
-                            seq,
-                            total,
-                            &file_name_for_progress,
-                            sent,
-                            total_bytes,
-                            speed,
-                        );
-                    },
-                ) {
-                    failed += 1;
-                    crate::diagnostics::warn(
-                        "push.run_native_upload_task",
-                        format!("file_name={file_name} stage=upload_to_oss err={err}"),
-                    );
-                    errors.push(format!("{file_name}: OSS 上传失败: {err}"));
-                    prepared.cleanup();
-                    continue;
-                }
-                uploaded_size = uploaded_size.saturating_add(file_size);
-
-                let signed_url = match build_verified_signed_download_url(
-                    &client,
-                    &auth,
-                    &bucket_cfg,
-                    &object_key,
-                ) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        failed += 1;
-                        crate::diagnostics::warn(
-                            "push.run_native_upload_task",
-                            format!(
-                                "file_name={file_name} stage=build_verified_signed_download_url err={err}"
-                            ),
-                        );
-                        errors.push(format!("{file_name}: 下载签名生成失败: {err}"));
-                        prepared.cleanup();
-                        continue;
-                    }
-                };
-                set_upload_progress_label(&app, &format!("上传进度: {seq}/{total} 写入推送队列"));
-                let (cb_id, cb_rev) = match put_push_message_doc(
-                    &client,
-                    &auth,
-                    &file_name,
-                    file_size,
-                    &resource_type,
-                    &object_key,
-                    &signed_url,
-                ) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        failed += 1;
-                        crate::diagnostics::warn(
-                            "push.run_native_upload_task",
-                            format!("file_name={file_name} stage=put_push_message_doc err={err}"),
-                        );
-                        errors.push(format!("{file_name}: 写入推送消息失败: {err}"));
-                        prepared.cleanup();
-                        continue;
-                    }
-                };
-                if let Err(err) = wait_for_remote_push_doc_ready(&client, &auth, &cb_id, &cb_rev) {
-                    failed += 1;
-                    crate::diagnostics::warn(
-                        "push.run_native_upload_task",
-                        format!(
-                            "file_name={file_name} stage=wait_for_remote_push_doc_ready doc_id={cb_id} err={err}"
-                        ),
-                    );
-                    errors.push(format!("{file_name}: 推送消息同步确认失败: {err}"));
-                    prepared.cleanup();
-                    continue;
-                }
-                set_upload_progress_label(&app, &format!("上传进度: {seq}/{total} 推送确认中"));
-                if let Err(err) = save_and_push(
-                    &client,
-                    &auth,
-                    &bucket_key,
-                    &object_key,
-                    &file_name,
-                    &resource_type,
-                    &cb_id,
-                    &cb_rev,
-                ) {
-                    failed += 1;
-                    crate::diagnostics::warn(
-                        "push.run_native_upload_task",
-                        format!(
-                            "file_name={file_name} stage=save_and_push doc_id={cb_id} err={err}"
-                        ),
-                    );
-                    errors.push(format!("{file_name}: saveAndPush 失败: {err}"));
-                    prepared.cleanup();
-                    continue;
-                }
-                success += 1;
-                set_upload_progress_label(&app, &format!("上传进度: {seq}/{total} 完成"));
-                prepared.cleanup();
+    for (index, file) in files.iter().enumerate() {
+        let seq = index + 1;
+        set_upload_progress_label(app, &format!("上传进度: {seq}/{total} 准备中"));
+        let prepared = match prepare_upload_file(file) {
+            Ok(value) => value,
+            Err(err) => {
+                failed += 1;
+                errors.push(err);
+                continue;
             }
+        };
+        let metadata = match fs::metadata(&prepared.upload_path) {
+            Ok(value) => value,
+            Err(err) => {
+                failed += 1;
+                errors.push(format!(
+                    "{}: 读取文件元信息失败: {}",
+                    prepared.source_label(),
+                    err
+                ));
+                prepared.cleanup();
+                continue;
+            }
+        };
+        if !metadata.is_file() {
+            failed += 1;
+            errors.push(format!("{}: 不是普通文件", prepared.source_label()));
+            prepared.cleanup();
+            continue;
+        }
+        if metadata.len() > MAX_SINGLE_UPLOAD_BYTES {
+            failed += 1;
+            errors.push(format!("{}: 文件超过 200MB 上限", prepared.source_label()));
+            prepared.cleanup();
+            continue;
+        }
+        if let Err(err) = validate_storage_quota_for_size(&auth, uploaded_size, metadata.len()) {
+            failed += 1;
+            errors.push(format!("{}: {}", prepared.source_label(), err));
+            prepared.cleanup();
+            continue;
+        }
+        let file_name = match prepared.file_name() {
+            Ok(value) => value.to_string(),
+            Err(err) => {
+                failed += 1;
+                errors.push(err);
+                prepared.cleanup();
+                continue;
+            }
+        };
+        let (object_key, resource_type) = build_object_key(&auth.uid, &prepared.upload_path);
+        let file_size = metadata.len();
+        set_upload_progress_label(app, &format!("上传进度: {seq}/{total} 上传中"));
+        update_upload_runtime_state(app, |state| {
+            state.current_file = Some(file_name.clone());
+            state.bytes_sent = Some(0);
+            state.bytes_total = Some(file_size);
+            state.progress_percent = Some(0.0);
+            state.speed_bps = Some(0.0);
+            state.eta_seconds = None;
+        });
+        let app_for_progress = app.clone();
+        let file_name_for_progress = file_name.clone();
+        if let Err(err) = upload_to_oss(
+            &client,
+            &bucket_cfg,
+            &sts,
+            &object_key,
+            &prepared.upload_path,
+            move |sent, total_bytes, elapsed| {
+                let speed = if elapsed.as_secs_f64() > 0.001 {
+                    sent as f64 / elapsed.as_secs_f64()
+                } else {
+                    0.0
+                };
+                update_upload_transfer_metrics(
+                    &app_for_progress,
+                    seq,
+                    total,
+                    &file_name_for_progress,
+                    sent,
+                    total_bytes,
+                    speed,
+                );
+            },
+        ) {
+            failed += 1;
+            crate::diagnostics::warn(
+                "push.perform_native_uploads",
+                format!("file_name={file_name} stage=upload_to_oss err={err}"),
+            );
+            errors.push(format!("{file_name}: OSS 上传失败: {err}"));
+            prepared.cleanup();
+            continue;
+        }
+        uploaded_size = uploaded_size.saturating_add(file_size);
 
-            Ok((success, failed, errors, warnings))
-        })();
+        let signed_url =
+            match build_verified_signed_download_url(&client, &auth, &bucket_cfg, &object_key) {
+                Ok(value) => value,
+                Err(err) => {
+                    failed += 1;
+                    crate::diagnostics::warn(
+                        "push.perform_native_uploads",
+                        format!(
+                            "file_name={file_name} stage=build_verified_signed_download_url err={err}"
+                        ),
+                    );
+                    errors.push(format!("{file_name}: 下载签名生成失败: {err}"));
+                    prepared.cleanup();
+                    continue;
+                }
+            };
+        set_upload_progress_label(app, &format!("上传进度: {seq}/{total} 写入推送队列"));
+        let (cb_id, cb_rev) = match put_push_message_doc(
+            &client,
+            &auth,
+            &file_name,
+            file_size,
+            &resource_type,
+            &object_key,
+            &signed_url,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                failed += 1;
+                crate::diagnostics::warn(
+                    "push.perform_native_uploads",
+                    format!("file_name={file_name} stage=put_push_message_doc err={err}"),
+                );
+                errors.push(format!("{file_name}: 写入推送消息失败: {err}"));
+                prepared.cleanup();
+                continue;
+            }
+        };
+        if let Err(err) = wait_for_remote_push_doc_ready(&client, &auth, &cb_id, &cb_rev) {
+            failed += 1;
+            crate::diagnostics::warn(
+                "push.perform_native_uploads",
+                format!(
+                    "file_name={file_name} stage=wait_for_remote_push_doc_ready doc_id={cb_id} err={err}"
+                ),
+            );
+            errors.push(format!("{file_name}: 推送消息同步确认失败: {err}"));
+            prepared.cleanup();
+            continue;
+        }
+        set_upload_progress_label(app, &format!("上传进度: {seq}/{total} 推送确认中"));
+        if let Err(err) = save_and_push(
+            &client,
+            &auth,
+            &bucket_key,
+            &object_key,
+            &file_name,
+            &resource_type,
+            &cb_id,
+            &cb_rev,
+        ) {
+            failed += 1;
+            crate::diagnostics::warn(
+                "push.perform_native_uploads",
+                format!("file_name={file_name} stage=save_and_push doc_id={cb_id} err={err}"),
+            );
+            errors.push(format!("{file_name}: saveAndPush 失败: {err}"));
+            prepared.cleanup();
+            continue;
+        }
+        success += 1;
+        set_upload_progress_label(app, &format!("上传进度: {seq}/{total} 完成"));
+        prepared.cleanup();
+    }
 
-        finish_upload_task(&app);
-        match result {
-            Ok((0, failed, errors, _)) if failed > 0 => {
-                set_upload_progress_label(&app, "上传进度: 全部失败");
-                clear_upload_transfer_metrics(&app);
-                let details = errors
+    Ok(UploadExecutionSummary {
+        success,
+        failed,
+        errors,
+        warnings,
+    })
+}
+
+fn finalize_upload_result(
+    app: &tauri::AppHandle,
+    result: Result<UploadExecutionSummary, String>,
+    show_dialog: bool,
+) -> Result<crate::models::DashboardSnapshot, String> {
+    finish_upload_task(app);
+    match result {
+        Ok(summary) if summary.success == 0 && summary.failed > 0 => {
+            set_upload_progress_label(app, "上传进度: 全部失败");
+            clear_upload_transfer_metrics(app);
+            let details = summary
+                .errors
+                .iter()
+                .take(2)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            let details_for_state = details.clone();
+            update_upload_runtime_state(app, move |state| {
+                state.last_error = Some(details_for_state.clone());
+            });
+            if show_dialog {
+                show_alert(app, format!("上传失败：所有文件均未成功上传。\n\n{details}"));
+            }
+            Err(if details.is_empty() {
+                "所有文件均未成功上传".to_string()
+            } else {
+                details
+            })
+        }
+        Ok(summary) => {
+            if summary.failed > 0 {
+                set_upload_progress_label(
+                    app,
+                    &format!("上传进度: 成功{} 失败{}", summary.success, summary.failed),
+                );
+                let details = summary
+                    .errors
                     .iter()
+                    .chain(summary.warnings.iter())
                     .take(2)
                     .cloned()
                     .collect::<Vec<_>>()
                     .join("\n");
                 let details_for_state = details.clone();
-                update_upload_runtime_state(&app, move |state| {
+                update_upload_runtime_state(app, move |state| {
                     state.last_error = Some(details_for_state.clone());
                 });
-                show_alert(
-                    &app,
-                    format!("上传失败：所有文件均未成功上传。\n\n{details}"),
-                );
-            }
-            Ok((success, failed, errors, warnings)) => {
-                if failed > 0 {
-                    set_upload_progress_label(
-                        &app,
-                        &format!("上传进度: 成功{success} 失败{failed}"),
-                    );
-                    let details = errors
-                        .iter()
-                        .chain(warnings.iter())
-                        .take(2)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let details_for_state = details.clone();
-                    update_upload_runtime_state(&app, move |state| {
-                        state.last_error = Some(details_for_state.clone());
-                    });
+                if show_dialog {
                     show_alert(
-                        &app,
-                        format!("上传完成：成功 {success}，失败 {failed}\n\n处理提示:\n{details}"),
+                        app,
+                        format!(
+                            "上传完成：成功 {}，失败 {}\n\n处理提示:\n{}",
+                            summary.success, summary.failed, details
+                        ),
                     );
-                } else {
-                    set_upload_progress_label(&app, "上传进度: 全部完成");
-                    update_upload_runtime_state(&app, |state| {
-                        state.last_error = None;
-                    });
                 }
-                let snapshot = build_dashboard_snapshot(&app);
-                set_dashboard_cache(&app, snapshot.clone());
-                crate::app::sync_reading_metrics_menu_from_snapshot(&app, &snapshot);
-            }
-            Err(err) => {
-                set_upload_progress_label(&app, "上传进度: 失败");
-                clear_upload_transfer_metrics(&app);
-                let err_for_state = err.clone();
-                update_upload_runtime_state(&app, move |state| {
-                    state.last_error = Some(err_for_state.clone());
+            } else {
+                set_upload_progress_label(app, "上传进度: 全部完成");
+                update_upload_runtime_state(app, |state| {
+                    state.last_error = None;
                 });
-                show_alert(&app, format!("上传失败：{err}"));
             }
+            let snapshot = build_dashboard_snapshot(app);
+            set_dashboard_cache(app, snapshot.clone());
+            crate::app::sync_reading_metrics_menu_from_snapshot(app, &snapshot);
+            Ok(snapshot)
         }
+        Err(err) => {
+            set_upload_progress_label(app, "上传进度: 失败");
+            clear_upload_transfer_metrics(app);
+            let err_for_state = err.clone();
+            update_upload_runtime_state(app, move |state| {
+                state.last_error = Some(err_for_state.clone());
+            });
+            if show_dialog {
+                show_alert(app, format!("上传失败：{err}"));
+            }
+            Err(err)
+        }
+    }
+}
+
+pub fn upload_files_blocking_with_active_task(
+    app: &tauri::AppHandle,
+    files: Vec<PathBuf>,
+    show_dialog: bool,
+) -> Result<crate::models::DashboardSnapshot, String> {
+    let result = perform_native_uploads(app, &files);
+    finalize_upload_result(app, result, show_dialog)
+}
+
+fn run_native_upload_task(app: tauri::AppHandle, files: Vec<PathBuf>) {
+    thread::spawn(move || {
+        let _ = upload_files_blocking_with_active_task(&app, files, true);
     });
 }
 
