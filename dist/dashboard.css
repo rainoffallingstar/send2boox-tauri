@@ -899,6 +899,14 @@ input {
   gap: 8px;
 }
 
+.workflow-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .zotero-search-field {
   display: flex;
   flex-direction: column;

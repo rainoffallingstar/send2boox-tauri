@@ -918,9 +918,60 @@ fn map_recent_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, String
     ))
 }
 
+fn build_zotero_item_summary(
+    conn: &Connection,
+    data_dir: &str,
+    item_id: i64,
+    item_key: String,
+    date_modified: String,
+    can_download_from_webdav: bool,
+) -> Result<Option<ZoteroItemSummary>, String> {
+    let title = fetch_field_value(conn, item_id, "title")
+        .unwrap_or_else(|| "未命名条目".to_string());
+    let author_summary = fetch_author_summary(conn, item_id)?;
+    let year = extract_year(fetch_field_value(conn, item_id, "date"));
+    let attachments = fetch_attachment_records(conn, data_dir, item_id)?
+        .into_iter()
+        .map(|record| build_attachment_summary(record, can_download_from_webdav))
+        .collect::<Vec<_>>();
+    if attachments.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(ZoteroItemSummary {
+        item_id,
+        item_key,
+        title,
+        author_summary,
+        year,
+        date_modified,
+        attachments,
+    }))
+}
+
+fn zotero_item_matches_query(item: &ZoteroItemSummary, query: &str) -> bool {
+    let mut haystack = vec![
+        item.title.clone(),
+        item.author_summary.clone().unwrap_or_default(),
+        item.year.clone().unwrap_or_default(),
+        item.date_modified.clone(),
+    ];
+    for attachment in &item.attachments {
+        haystack.push(attachment.file_name.clone().unwrap_or_default());
+        haystack.push(attachment.attachment_key.clone());
+        haystack.push(attachment.content_type.clone().unwrap_or_default());
+        haystack.push(attachment.status_label.clone());
+    }
+    haystack
+        .join(" ")
+        .to_lowercase()
+        .contains(query)
+}
+
 fn list_recent_items_inner(
     app: &tauri::AppHandle,
     limit: Option<usize>,
+    offset: Option<usize>,
+    search: Option<String>,
 ) -> Result<Vec<ZoteroItemSummary>, String> {
     let config = load_zotero_config(app);
     let data_dir = config
@@ -936,7 +987,10 @@ fn list_recent_items_inner(
         && config.webdav_username.is_some()
         && has_password;
     let (temp_dir, conn) = open_copied_database(&data_dir)?;
-    let rows = if let Some(limit) = limit.filter(|value| *value > 0) {
+    let offset = offset.unwrap_or(0);
+    let search = normalize_optional(search).map(|value| value.to_lowercase());
+    let rows = if search.is_none() && limit.filter(|value| *value > 0).is_some() {
+        let limit = limit.unwrap_or_default();
         let mut stmt = conn
             .prepare(
                 "SELECT i.itemID, i.key, i.dateModified
@@ -946,11 +1000,32 @@ fn list_recent_items_inner(
                  WHERE l.type = 'user'
                    AND it.typeName NOT IN ('attachment', 'note', 'annotation')
                  ORDER BY i.dateModified DESC
-                 LIMIT ?1",
+                 LIMIT ?1 OFFSET ?2",
             )
             .map_err(|err| err.to_string())?;
         let mapped = stmt
-            .query_map(params![limit as i64], map_recent_item_row)
+            .query_map(params![limit as i64, offset as i64], map_recent_item_row)
+            .map_err(|err| err.to_string())?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row.map_err(|err| err.to_string())?);
+        }
+        rows
+    } else if search.is_none() && offset > 0 {
+        let mut stmt = conn
+            .prepare(
+                "SELECT i.itemID, i.key, i.dateModified
+                 FROM items i
+                 JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
+                 JOIN libraries l ON l.libraryID = i.libraryID
+                 WHERE l.type = 'user'
+                   AND it.typeName NOT IN ('attachment', 'note', 'annotation')
+                 ORDER BY i.dateModified DESC
+                 LIMIT -1 OFFSET ?1",
+            )
+            .map_err(|err| err.to_string())?;
+        let mapped = stmt
+            .query_map(params![offset as i64], map_recent_item_row)
             .map_err(|err| err.to_string())?;
         let mut rows = Vec::new();
         for row in mapped {
@@ -979,25 +1054,35 @@ fn list_recent_items_inner(
         rows
     };
     let mut items = Vec::new();
+    let page_limit = limit.filter(|value| *value > 0);
+    let mut matched = 0_usize;
     for row in rows {
         let (item_id, item_key, date_modified) = row;
-        let title = fetch_field_value(&conn, item_id, "title")
-            .unwrap_or_else(|| "未命名条目".to_string());
-        let author_summary = fetch_author_summary(&conn, item_id)?;
-        let year = extract_year(fetch_field_value(&conn, item_id, "date"));
-        let attachments = fetch_attachment_records(&conn, &data_dir, item_id)?
-            .into_iter()
-            .map(|record| build_attachment_summary(record, can_download_from_webdav))
-            .collect::<Vec<_>>();
-        items.push(ZoteroItemSummary {
+        let Some(item) = build_zotero_item_summary(
+            &conn,
+            &data_dir,
             item_id,
             item_key,
-            title,
-            author_summary,
-            year,
             date_modified,
-            attachments,
-        });
+            can_download_from_webdav,
+        )? else {
+            continue;
+        };
+        if let Some(query) = search.as_deref() {
+            if !zotero_item_matches_query(&item, query) {
+                continue;
+            }
+            if matched < offset {
+                matched += 1;
+                continue;
+            }
+        }
+        items.push(item);
+        if let Some(limit) = page_limit {
+            if items.len() >= limit {
+                break;
+            }
+        }
     }
     let _ = fs::remove_dir_all(temp_dir);
     Ok(items)
@@ -1210,9 +1295,13 @@ pub async fn zotero_save_and_validate(
 pub async fn zotero_list_recent_items(
     app: tauri::AppHandle,
     limit: Option<usize>,
+    offset: Option<usize>,
+    search: Option<String>,
 ) -> Result<Vec<ZoteroItemSummary>, String> {
     let app_for_task = app.clone();
-    tauri::async_runtime::spawn_blocking(move || list_recent_items_inner(&app_for_task, limit))
+    tauri::async_runtime::spawn_blocking(move || {
+        list_recent_items_inner(&app_for_task, limit, offset, search)
+    })
     .await
     .map_err(|err| err.to_string())?
 }

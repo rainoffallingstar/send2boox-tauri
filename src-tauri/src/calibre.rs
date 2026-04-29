@@ -471,6 +471,26 @@ fn map_recent_book_row(
     ))
 }
 
+fn calibre_book_matches_query(book: &CalibreBookSummary, query: &str) -> bool {
+    let mut haystack = vec![
+        book.title.clone(),
+        book.author_summary.clone().unwrap_or_default(),
+        book.published_year.clone().unwrap_or_default(),
+        book.library_label.clone(),
+        book.library_dir.clone(),
+        book.date_modified.clone(),
+    ];
+    for format in &book.formats {
+        haystack.push(format.format.clone());
+        haystack.push(format.file_name.clone().unwrap_or_default());
+        haystack.push(format.status_label.clone());
+    }
+    haystack
+        .join(" ")
+        .to_lowercase()
+        .contains(query)
+}
+
 fn list_recent_books_from_library(
     library_dir: &str,
     limit: Option<usize>,
@@ -536,6 +556,8 @@ fn list_recent_books_from_library(
 fn list_recent_books_inner(
     app: &tauri::AppHandle,
     limit: Option<usize>,
+    offset: Option<usize>,
+    search: Option<String>,
 ) -> Result<Vec<CalibreBookSummary>, String> {
     let config = load_calibre_config(app);
     let library_dirs = ready_library_dirs(&config);
@@ -543,11 +565,29 @@ fn list_recent_books_inner(
         return Err("请先补全 Calibre 书库目录".to_string());
     }
     let mut books = Vec::new();
-    let per_library_limit = limit.filter(|value| *value > 0).map(|value| value.max(10));
+    let offset = offset.unwrap_or(0);
+    let search = normalize_optional(search).map(|value| value.to_lowercase());
+    let fetch_limit = if search.is_some() {
+        None
+    } else {
+        limit
+        .filter(|value| *value > 0)
+        .map(|value| offset.saturating_add(value).max(10))
+    };
+    let per_library_limit = fetch_limit;
     for library_dir in library_dirs {
         books.extend(list_recent_books_from_library(&library_dir, per_library_limit)?);
     }
     books.sort_by(|a, b| b.date_modified.cmp(&a.date_modified));
+    if let Some(query) = search.as_deref() {
+        books = books
+            .into_iter()
+            .filter(|book| calibre_book_matches_query(book, query))
+            .collect();
+    }
+    if offset > 0 {
+        books = books.into_iter().skip(offset).collect();
+    }
     if let Some(limit) = limit.filter(|value| *value > 0) {
         books.truncate(limit);
     }
@@ -711,9 +751,13 @@ pub async fn calibre_save_library_dir(
 pub async fn calibre_list_recent_books(
     app: tauri::AppHandle,
     limit: Option<usize>,
+    offset: Option<usize>,
+    search: Option<String>,
 ) -> Result<Vec<CalibreBookSummary>, String> {
     let app_for_task = app.clone();
-    tauri::async_runtime::spawn_blocking(move || list_recent_books_inner(&app_for_task, limit))
+    tauri::async_runtime::spawn_blocking(move || {
+        list_recent_books_inner(&app_for_task, limit, offset, search)
+    })
     .await
     .map_err(|err| err.to_string())?
 }

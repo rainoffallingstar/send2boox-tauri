@@ -99,9 +99,13 @@ function createCalibreForm() {
   };
 }
 
+const LIBRARY_PAGE_SIZE = 50;
+
 const state = {
   timer: null,
   syncTimer: null,
+  zoteroSearchTimer: null,
+  calibreSearchTimer: null,
   snapshot: null,
   loading: false,
   pendingForce: false,
@@ -114,6 +118,8 @@ const state = {
   zotero: {
     status: null,
     items: [],
+    page: 0,
+    hasMore: false,
     loadingStatus: false,
     loadingItems: false,
     pushingAttachmentId: null,
@@ -126,6 +132,8 @@ const state = {
   calibre: {
     status: null,
     books: [],
+    page: 0,
+    hasMore: false,
     loadingStatus: false,
     loadingBooks: false,
     pushingFormatKey: null,
@@ -678,6 +686,30 @@ function buildZoteroWorkflowStats(items) {
       <span class="zotero-count-pill">${escapeHtml(`${attachmentCount} 个附件`)}</span>
       <span class="zotero-count-pill is-ready">${escapeHtml(`可推送 ${pushableCount}`)}</span>
       <span class="zotero-count-pill">${escapeHtml(`本地就绪 ${localReadyCount}`)}</span>
+    </div>
+  `;
+}
+
+function buildWorkflowPagination(kind, page, hasMore, loading) {
+  const prevDisabled = loading || page <= 0;
+  const nextDisabled = loading || !hasMore;
+  return `
+    <div class="workflow-pagination">
+      <p class="inline-note">第 ${escapeHtml(String(page + 1))} 页 · 每页 ${escapeHtml(String(LIBRARY_PAGE_SIZE))} 条</p>
+      <div class="section-actions">
+        <button
+          class="button button-tertiary button-xs"
+          data-action="${escapeHtml(`${kind}-page-prev`)}"
+          type="button"
+          ${prevDisabled ? "disabled" : ""}
+        >上一页</button>
+        <button
+          class="button button-tertiary button-xs"
+          data-action="${escapeHtml(`${kind}-page-next`)}"
+          type="button"
+          ${nextDisabled ? "disabled" : ""}
+        >下一页</button>
+      </div>
     </div>
   `;
 }
@@ -1641,6 +1673,7 @@ function renderZoteroView() {
                 <div class="zotero-workflow-toolbar-main">
                   ${buildZoteroWorkflowStats(allItems)}
                   <p class="inline-note">这里只展示带附件的文献。第一版仅支持 stored attachments；若本地文件缺失但远端 WebDAV 可用，推送时会按需拉取。</p>
+                  ${buildWorkflowPagination("zotero", state.zotero.page, state.zotero.hasMore, state.zotero.loadingItems)}
                 </div>
                 <label class="zotero-search-field">
                   <span>筛选条目或附件</span>
@@ -1709,6 +1742,7 @@ function renderCalibreView() {
                 <div class="zotero-workflow-toolbar-main">
                   ${buildCalibreWorkflowStats(allBooks)}
                   <p class="inline-note">这里直接读取 Calibre 的 metadata.db。即使库目录和文件名是拼音，推送名称也会改成数据库里的原始书名。</p>
+                  ${buildWorkflowPagination("calibre", state.calibre.page, state.calibre.hasMore, state.calibre.loadingBooks)}
                 </div>
                 <label class="zotero-search-field">
                   <span>筛选书籍或格式</span>
@@ -1925,6 +1959,11 @@ async function loadZoteroStatus(forceItems = false) {
     const status = await invokeWithTimeout("zotero_status", {}, 10000);
     state.zotero.status = status;
     syncZoteroFormFromStatus(status);
+    if (status?.state !== "connected") {
+      state.zotero.items = [];
+      state.zotero.hasMore = false;
+      state.zotero.page = 0;
+    }
     renderToolbar();
     renderCurrentView();
     if (status?.state === "connected" && !state.zotero.loadingItems && (forceItems || state.activeView === "zotero")) {
@@ -1953,12 +1992,31 @@ async function autoConnectZoteroIfReady(status, reason = "自动连接") {
   return true;
 }
 
-async function loadZoteroItems() {
+async function loadZoteroItems(page = state.zotero.page) {
+  const nextPage = Math.max(0, Number(page) || 0);
+  const search = String(state.zotero.filterText || "").trim();
   state.zotero.loadingItems = true;
+  state.zotero.page = nextPage;
   renderCurrentView();
   try {
-    state.zotero.items = await invokeWithTimeout("zotero_list_recent_items", {}, 30000);
+    const result = await invokeWithTimeout(
+      "zotero_list_recent_items",
+      {
+        limit: LIBRARY_PAGE_SIZE + 1,
+        offset: nextPage * LIBRARY_PAGE_SIZE,
+        search: search || null
+      },
+      30000
+    );
+    const list = Array.isArray(result) ? result : [];
+    state.zotero.hasMore = list.length > LIBRARY_PAGE_SIZE;
+    state.zotero.items = list.slice(0, LIBRARY_PAGE_SIZE);
+    if (nextPage > 0 && state.zotero.items.length === 0) {
+      await loadZoteroItems(nextPage - 1);
+      return;
+    }
   } catch (err) {
+    state.zotero.hasMore = false;
     state.zotero.phaseError = `加载 Zotero 条目失败: ${String(err)}`;
   } finally {
     state.zotero.loadingItems = false;
@@ -2132,6 +2190,8 @@ async function loadCalibreStatus(forceBooks = false) {
     syncCalibreFormFromStatus(status);
     if (Number(status?.summary?.ready_library_count || 0) === 0) {
       state.calibre.books = [];
+      state.calibre.hasMore = false;
+      state.calibre.page = 0;
     }
     if (forceBooks && Number(status?.summary?.ready_library_count || 0) > 0 && !state.calibre.loadingBooks) {
       await loadCalibreBooks();
@@ -2143,17 +2203,60 @@ async function loadCalibreStatus(forceBooks = false) {
   }
 }
 
-async function loadCalibreBooks() {
+async function loadCalibreBooks(page = state.calibre.page) {
+  const nextPage = Math.max(0, Number(page) || 0);
+  const search = String(state.calibre.filterText || "").trim();
   state.calibre.loadingBooks = true;
+  state.calibre.page = nextPage;
   renderCurrentView();
   try {
-    state.calibre.books = await invokeWithTimeout("calibre_list_recent_books", {}, 30000);
+    const result = await invokeWithTimeout(
+      "calibre_list_recent_books",
+      {
+        limit: LIBRARY_PAGE_SIZE + 1,
+        offset: nextPage * LIBRARY_PAGE_SIZE,
+        search: search || null
+      },
+      30000
+    );
+    const list = Array.isArray(result) ? result : [];
+    state.calibre.hasMore = list.length > LIBRARY_PAGE_SIZE;
+    state.calibre.books = list.slice(0, LIBRARY_PAGE_SIZE);
+    if (nextPage > 0 && state.calibre.books.length === 0) {
+      setCalibreScrollTop(0);
+      await loadCalibreBooks(nextPage - 1);
+      return;
+    }
   } catch (err) {
+    state.calibre.hasMore = false;
     state.calibre.phaseError = `加载 Calibre 书籍失败: ${String(err)}`;
   } finally {
     state.calibre.loadingBooks = false;
     renderCurrentView();
   }
+}
+
+function scheduleZoteroSearch() {
+  if (state.zoteroSearchTimer) {
+    clearTimeout(state.zoteroSearchTimer);
+    state.zoteroSearchTimer = null;
+  }
+  state.zoteroSearchTimer = setTimeout(() => {
+    state.zoteroSearchTimer = null;
+    loadZoteroItems(0);
+  }, 220);
+}
+
+function scheduleCalibreSearch() {
+  if (state.calibreSearchTimer) {
+    clearTimeout(state.calibreSearchTimer);
+    state.calibreSearchTimer = null;
+  }
+  state.calibreSearchTimer = setTimeout(() => {
+    state.calibreSearchTimer = null;
+    setCalibreScrollTop(0);
+    loadCalibreBooks(0);
+  }, 220);
 }
 
 async function ensureCalibreData() {
@@ -2455,6 +2558,14 @@ function bindActions() {
         await loadZoteroItems();
         return;
       }
+      if (action === "zotero-page-prev") {
+        await loadZoteroItems(Math.max(0, state.zotero.page - 1));
+        return;
+      }
+      if (action === "zotero-page-next") {
+        await loadZoteroItems(state.zotero.page + 1);
+        return;
+      }
       if (action === "zotero-push-attachment") {
         await pushZoteroAttachment(actionButton.dataset.attachmentId || "");
         return;
@@ -2488,6 +2599,16 @@ function bindActions() {
         await loadCalibreBooks();
         return;
       }
+      if (action === "calibre-page-prev") {
+        setCalibreScrollTop(0);
+        await loadCalibreBooks(Math.max(0, state.calibre.page - 1));
+        return;
+      }
+      if (action === "calibre-page-next") {
+        setCalibreScrollTop(0);
+        await loadCalibreBooks(state.calibre.page + 1);
+        return;
+      }
       if (action === "calibre-push-format") {
         await pushCalibreFormat(actionButton.dataset.libraryDir || "", actionButton.dataset.dataId || "");
         return;
@@ -2503,7 +2624,9 @@ function bindActions() {
       const selectionStart = input.selectionStart;
       const selectionEnd = input.selectionEnd;
       state.zotero.filterText = input.value;
+      state.zotero.page = 0;
       renderCurrentView();
+      scheduleZoteroSearch();
       const nextInput = document.querySelector('input[data-zotero-search="items"]');
       if (nextInput instanceof HTMLInputElement) {
         nextInput.focus();
@@ -2518,7 +2641,9 @@ function bindActions() {
       const selectionStart = input.selectionStart;
       const selectionEnd = input.selectionEnd;
       setCalibreFilterText(input.value);
+      state.calibre.page = 0;
       renderCurrentView();
+      scheduleCalibreSearch();
       const nextInput = document.querySelector('input[data-calibre-search="books"]');
       if (nextInput instanceof HTMLInputElement) {
         nextInput.focus();
@@ -2623,6 +2748,14 @@ document.addEventListener("DOMContentLoaded", () => {
     if (state.syncTimer) {
       clearInterval(state.syncTimer);
       state.syncTimer = null;
+    }
+    if (state.zoteroSearchTimer) {
+      clearTimeout(state.zoteroSearchTimer);
+      state.zoteroSearchTimer = null;
+    }
+    if (state.calibreSearchTimer) {
+      clearTimeout(state.calibreSearchTimer);
+      state.calibreSearchTimer = null;
     }
   });
 });
