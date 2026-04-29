@@ -1927,7 +1927,7 @@ async function loadZoteroStatus(forceItems = false) {
     syncZoteroFormFromStatus(status);
     renderToolbar();
     renderCurrentView();
-    if (status?.state === "connected" && !state.zotero.loadingItems) {
+    if (status?.state === "connected" && !state.zotero.loadingItems && (forceItems || state.activeView === "zotero")) {
       await loadZoteroItems();
     }
   } finally {
@@ -1968,7 +1968,7 @@ async function loadZoteroItems() {
 
 async function ensureZoteroData() {
   if (!state.zotero.status) {
-    await loadZoteroStatus();
+    await loadZoteroStatus(true);
     return;
   }
   if (await autoConnectZoteroIfReady(state.zotero.status, "进入 Zotero 页面")) {
@@ -1998,7 +1998,7 @@ async function detectZoteroConfig() {
     if (await autoConnectZoteroIfReady(state.zotero.status, "自动检测完成")) {
       return;
     }
-    if (state.zotero.status?.state === "connected") {
+    if (state.zotero.status?.state === "connected" && state.activeView === "zotero") {
       await loadZoteroItems();
     }
   } catch (err) {
@@ -2022,7 +2022,7 @@ async function pickZoteroDirectory(kind) {
     if (await autoConnectZoteroIfReady(status, "目录补全完成")) {
       return;
     }
-    if (status?.state === "connected") {
+    if (status?.state === "connected" && state.activeView === "zotero") {
       await loadZoteroItems();
     } else {
       renderCurrentView();
@@ -2058,6 +2058,7 @@ async function bootstrapZoteroAutoDetect() {
 
 async function saveZoteroConfig(options = {}) {
   const auto = options.auto === true;
+  const loadItemsAfterConnect = options.loadItemsAfterConnect === true || state.activeView === "zotero";
   state.zotero.phase = "validating";
   state.zotero.phaseError = "";
   setUploadStatusOverride(auto ? "上传进度: 正在自动连接 Zotero..." : "上传进度: 正在保存并验证 Zotero 配置...", 10000);
@@ -2082,7 +2083,9 @@ async function saveZoteroConfig(options = {}) {
     if (status?.state === "connected") {
       state.zotero.phaseError = auto ? "Zotero 已自动连接。" : "Zotero 连接已就绪。";
       setUploadStatusOverride(auto ? "上传进度: Zotero 已自动连接" : "上传进度: Zotero 配置验证完成", 4000);
-      await loadZoteroItems();
+      if (loadItemsAfterConnect) {
+        await loadZoteroItems();
+      }
     } else {
       state.zotero.phaseError = formatZoteroStateNote(status);
     }
@@ -2155,7 +2158,7 @@ async function loadCalibreBooks() {
 
 async function ensureCalibreData() {
   if (!state.calibre.status) {
-    await loadCalibreStatus();
+    await loadCalibreStatus(true);
     return;
   }
   if (
@@ -2182,7 +2185,7 @@ async function detectCalibreLibrary() {
     state.calibre.phaseError = Number(status?.summary?.ready_library_count || 0) > 0
       ? "已检测到默认 Calibre 书库。"
       : formatCalibreStateNote(status);
-    if (Number(status?.summary?.ready_library_count || 0) > 0) {
+    if (Number(status?.summary?.ready_library_count || 0) > 0 && state.activeView === "calibre") {
       await loadCalibreBooks();
     } else {
       state.calibre.books = [];
@@ -2205,7 +2208,7 @@ async function refreshCalibreLibraries() {
     const status = await invokeWithTimeout("calibre_refresh_libraries", {}, 12000);
     state.calibre.status = status;
     syncCalibreFormFromStatus(status);
-    if (Number(status?.summary?.ready_library_count || 0) > 0) {
+    if (Number(status?.summary?.ready_library_count || 0) > 0 && state.activeView === "calibre") {
       await loadCalibreBooks();
       state.calibre.phaseError = status?.last_error || "书库检查完成。";
     } else {
@@ -2228,7 +2231,7 @@ async function pickCalibreLibraryDirectory() {
     const status = await invokeWithTimeout("calibre_pick_library_dir", {}, 30000);
     state.calibre.status = status;
     syncCalibreFormFromStatus(status);
-    if (Number(status?.summary?.ready_library_count || 0) > 0) {
+    if (Number(status?.summary?.ready_library_count || 0) > 0 && state.activeView === "calibre") {
       await loadCalibreBooks();
     } else {
       state.calibre.books = [];
@@ -2262,7 +2265,9 @@ async function saveCalibreConfig() {
     if (Number(status?.summary?.ready_library_count || 0) > 0) {
       state.calibre.phaseError = "Calibre 书库已连接。";
       setUploadStatusOverride("上传进度: Calibre 书库配置完成", 4000);
-      await loadCalibreBooks();
+      if (state.activeView === "calibre") {
+        await loadCalibreBooks();
+      }
     } else {
       state.calibre.books = [];
       state.calibre.phaseError = formatCalibreStateNote(status);
