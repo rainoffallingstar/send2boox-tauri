@@ -451,35 +451,68 @@ fn fetch_format_records(
     Ok(formats)
 }
 
+fn map_recent_book_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(
+    i64,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+)> {
+    Ok((
+        row.get::<_, i64>(0)?,
+        row.get::<_, Option<String>>(1)?,
+        row.get::<_, Option<String>>(2)?,
+        row.get::<_, String>(3)?,
+        row.get::<_, Option<String>>(4)?,
+        row.get::<_, Option<String>>(5)?,
+    ))
+}
+
 fn list_recent_books_from_library(
     library_dir: &str,
-    limit: usize,
+    limit: Option<usize>,
 ) -> Result<Vec<CalibreBookSummary>, String> {
     let (temp_dir, conn) = open_copied_database(library_dir)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, title, author_sort, path, last_modified, pubdate
-             FROM books
-             ORDER BY last_modified DESC
-             LIMIT ?1",
-        )
-        .map_err(|err| err.to_string())?;
-    let rows = stmt
-        .query_map(params![limit as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-            ))
-        })
-        .map_err(|err| err.to_string())?;
+    let rows = if let Some(limit) = limit.filter(|value| *value > 0) {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, author_sort, path, last_modified, pubdate
+                 FROM books
+                 ORDER BY last_modified DESC
+                 LIMIT ?1",
+            )
+            .map_err(|err| err.to_string())?;
+        let mapped = stmt
+            .query_map(params![limit as i64], map_recent_book_row)
+            .map_err(|err| err.to_string())?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row.map_err(|err| err.to_string())?);
+        }
+        rows
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, author_sort, path, last_modified, pubdate
+                 FROM books
+                 ORDER BY last_modified DESC",
+            )
+            .map_err(|err| err.to_string())?;
+        let mapped = stmt
+            .query_map([], map_recent_book_row)
+            .map_err(|err| err.to_string())?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row.map_err(|err| err.to_string())?);
+        }
+        rows
+    };
     let mut books = Vec::new();
     for row in rows {
-        let (book_id, title, author_sort, relative_book_path, last_modified, pubdate) =
-            row.map_err(|err| err.to_string())?;
+        let (book_id, title, author_sort, relative_book_path, last_modified, pubdate) = row;
         let formats =
             fetch_format_records(&conn, &library_dir, book_id, &relative_book_path)?;
         if formats.is_empty() {
@@ -502,7 +535,7 @@ fn list_recent_books_from_library(
 
 fn list_recent_books_inner(
     app: &tauri::AppHandle,
-    limit: usize,
+    limit: Option<usize>,
 ) -> Result<Vec<CalibreBookSummary>, String> {
     let config = load_calibre_config(app);
     let library_dirs = ready_library_dirs(&config);
@@ -510,12 +543,14 @@ fn list_recent_books_inner(
         return Err("请先补全 Calibre 书库目录".to_string());
     }
     let mut books = Vec::new();
-    let per_library_limit = limit.max(10);
+    let per_library_limit = limit.filter(|value| *value > 0).map(|value| value.max(10));
     for library_dir in library_dirs {
         books.extend(list_recent_books_from_library(&library_dir, per_library_limit)?);
     }
     books.sort_by(|a, b| b.date_modified.cmp(&a.date_modified));
-    books.truncate(limit);
+    if let Some(limit) = limit.filter(|value| *value > 0) {
+        books.truncate(limit);
+    }
     Ok(books)
 }
 
@@ -678,9 +713,7 @@ pub async fn calibre_list_recent_books(
     limit: Option<usize>,
 ) -> Result<Vec<CalibreBookSummary>, String> {
     let app_for_task = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        list_recent_books_inner(&app_for_task, limit.unwrap_or(50).min(50))
-    })
+    tauri::async_runtime::spawn_blocking(move || list_recent_books_inner(&app_for_task, limit))
     .await
     .map_err(|err| err.to_string())?
 }
@@ -784,7 +817,7 @@ mod tests {
         )
         .unwrap();
 
-        let books = list_recent_books_from_library(&library_dir.to_string_lossy(), 10).unwrap();
+        let books = list_recent_books_from_library(&library_dir.to_string_lossy(), Some(10)).unwrap();
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].title, "三体");
         assert_eq!(books[0].formats[0].data_id, 7);

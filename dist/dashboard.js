@@ -687,7 +687,7 @@ function buildZoteroWorkflowItems(items) {
     return `
       <div class="empty-card compact">
         <h3>暂无可展示的条目</h3>
-        <p class="empty-copy">连接完成后会展示最近 50 条个人库文献及其附件状态。</p>
+        <p class="empty-copy">连接完成后会展示个人库文献及其附件状态。</p>
       </div>
     `;
   }
@@ -815,7 +815,7 @@ function buildCalibreWorkflowBooks(books) {
     return `
       <div class="empty-card compact">
         <h3>暂无可展示的书籍</h3>
-        <p class="empty-copy">连接完成后，这里会展示最近 50 本带格式文件的 Calibre 书籍。</p>
+        <p class="empty-copy">连接完成后，这里会展示带格式文件的 Calibre 书籍。</p>
       </div>
     `;
   }
@@ -1258,7 +1258,6 @@ function renderOverview(snapshot) {
   const profile = snapshot?.profile || {};
   const upload = snapshot?.upload || {};
   const devices = snapshot?.devices || [];
-  const pushQueue = snapshot?.push_queue || [];
   const readingInfo = snapshot?.calendar_metrics?.reading_info || {};
   const readTimeWeek = snapshot?.calendar_metrics?.read_time_week || {};
   const dayReadToday = snapshot?.calendar_metrics?.day_read_today || {};
@@ -1313,18 +1312,7 @@ function renderOverview(snapshot) {
             </div>
           </section>
 
-          <section class="panel-card soft">
-            <div class="panel-header">
-              <div>
-                <h3>最近互动文件</h3>
-                <p>展示最近同步到云端的互动文件，并支持直接重推或删除。</p>
-              </div>
-              <div class="section-actions">
-                <button class="button button-tertiary button-xs" data-view-target="push" type="button">查看全部</button>
-              </div>
-            </div>
-            <ul class="push-list">${buildPushItems(pushQueue, { limit: 4, emptyText: "暂无互动文件" })}</ul>
-          </section>
+          ${buildCalibreConnectionCard({ embedded: true })}
         </div>
 
         <div class="stack">
@@ -1367,7 +1355,6 @@ function renderOverview(snapshot) {
           </section>
 
           ${buildZoteroConnectionCard({ embedded: true })}
-          ${buildCalibreConnectionCard({ embedded: true })}
         </div>
       </div>
     </section>
@@ -1970,7 +1957,7 @@ async function loadZoteroItems() {
   state.zotero.loadingItems = true;
   renderCurrentView();
   try {
-    state.zotero.items = await invokeWithTimeout("zotero_list_recent_items", { limit: 50 }, 15000);
+    state.zotero.items = await invokeWithTimeout("zotero_list_recent_items", {}, 30000);
   } catch (err) {
     state.zotero.phaseError = `加载 Zotero 条目失败: ${String(err)}`;
   } finally {
@@ -2157,7 +2144,7 @@ async function loadCalibreBooks() {
   state.calibre.loadingBooks = true;
   renderCurrentView();
   try {
-    state.calibre.books = await invokeWithTimeout("calibre_list_recent_books", { limit: 50 }, 15000);
+    state.calibre.books = await invokeWithTimeout("calibre_list_recent_books", {}, 30000);
   } catch (err) {
     state.calibre.phaseError = `加载 Calibre 书籍失败: ${String(err)}`;
   } finally {

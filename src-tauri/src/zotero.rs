@@ -910,9 +910,17 @@ fn build_attachment_summary(
     }
 }
 
+fn map_recent_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, String, String)> {
+    Ok((
+        row.get::<_, i64>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, String>(2)?,
+    ))
+}
+
 fn list_recent_items_inner(
     app: &tauri::AppHandle,
-    limit: usize,
+    limit: Option<usize>,
 ) -> Result<Vec<ZoteroItemSummary>, String> {
     let config = load_zotero_config(app);
     let data_dir = config
@@ -928,30 +936,51 @@ fn list_recent_items_inner(
         && config.webdav_username.is_some()
         && has_password;
     let (temp_dir, conn) = open_copied_database(&data_dir)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT i.itemID, i.key, i.dateModified
-             FROM items i
-             JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
-             JOIN libraries l ON l.libraryID = i.libraryID
-             WHERE l.type = 'user'
-               AND it.typeName NOT IN ('attachment', 'note', 'annotation')
-             ORDER BY i.dateModified DESC
-             LIMIT ?1",
-        )
-        .map_err(|err| err.to_string())?;
-    let rows = stmt
-        .query_map(params![limit as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .map_err(|err| err.to_string())?;
+    let rows = if let Some(limit) = limit.filter(|value| *value > 0) {
+        let mut stmt = conn
+            .prepare(
+                "SELECT i.itemID, i.key, i.dateModified
+                 FROM items i
+                 JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
+                 JOIN libraries l ON l.libraryID = i.libraryID
+                 WHERE l.type = 'user'
+                   AND it.typeName NOT IN ('attachment', 'note', 'annotation')
+                 ORDER BY i.dateModified DESC
+                 LIMIT ?1",
+            )
+            .map_err(|err| err.to_string())?;
+        let mapped = stmt
+            .query_map(params![limit as i64], map_recent_item_row)
+            .map_err(|err| err.to_string())?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row.map_err(|err| err.to_string())?);
+        }
+        rows
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "SELECT i.itemID, i.key, i.dateModified
+                 FROM items i
+                 JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
+                 JOIN libraries l ON l.libraryID = i.libraryID
+                 WHERE l.type = 'user'
+                   AND it.typeName NOT IN ('attachment', 'note', 'annotation')
+                 ORDER BY i.dateModified DESC",
+            )
+            .map_err(|err| err.to_string())?;
+        let mapped = stmt
+            .query_map([], map_recent_item_row)
+            .map_err(|err| err.to_string())?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row.map_err(|err| err.to_string())?);
+        }
+        rows
+    };
     let mut items = Vec::new();
     for row in rows {
-        let (item_id, item_key, date_modified) = row.map_err(|err| err.to_string())?;
+        let (item_id, item_key, date_modified) = row;
         let title = fetch_field_value(&conn, item_id, "title")
             .unwrap_or_else(|| "未命名条目".to_string());
         let author_summary = fetch_author_summary(&conn, item_id)?;
@@ -1183,9 +1212,7 @@ pub async fn zotero_list_recent_items(
     limit: Option<usize>,
 ) -> Result<Vec<ZoteroItemSummary>, String> {
     let app_for_task = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        list_recent_items_inner(&app_for_task, limit.unwrap_or(50).min(50))
-    })
+    tauri::async_runtime::spawn_blocking(move || list_recent_items_inner(&app_for_task, limit))
     .await
     .map_err(|err| err.to_string())?
 }
