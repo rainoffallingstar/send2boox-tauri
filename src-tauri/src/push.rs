@@ -49,9 +49,16 @@ fn dialog_paths_to_std(paths: Vec<FilePath>) -> Vec<PathBuf> {
         .collect()
 }
 
+#[derive(Debug, Clone)]
+pub struct UploadItem {
+    pub path: PathBuf,
+    pub display_name: Option<String>,
+}
+
 struct PreparedUploadFile {
     original_path: PathBuf,
     upload_path: PathBuf,
+    display_name: Option<String>,
 }
 
 struct UploadExecutionSummary {
@@ -63,6 +70,9 @@ struct UploadExecutionSummary {
 
 impl PreparedUploadFile {
     fn file_name(&self) -> Result<&str, String> {
+        if let Some(name) = self.display_name.as_deref() {
+            return Ok(name);
+        }
         self.upload_path
             .file_name()
             .and_then(|name| name.to_str())
@@ -80,13 +90,20 @@ fn prepare_upload_file(path: &Path) -> Result<PreparedUploadFile, String> {
     Ok(PreparedUploadFile {
         original_path: path.to_path_buf(),
         upload_path: path.to_path_buf(),
+        display_name: None,
     })
 }
 
-fn validate_storage_quota(auth: &UploadAuthContext, files: &[PathBuf]) -> Result<(), String> {
+fn prepare_upload_item(item: &UploadItem) -> Result<PreparedUploadFile, String> {
+    let mut prepared = prepare_upload_file(&item.path)?;
+    prepared.display_name = item.display_name.clone();
+    Ok(prepared)
+}
+
+fn validate_storage_quota(auth: &UploadAuthContext, files: &[UploadItem]) -> Result<(), String> {
     let total_size: u64 = files
         .iter()
-        .filter_map(|path| fs::metadata(path).ok().map(|meta| meta.len()))
+        .filter_map(|item| fs::metadata(&item.path).ok().map(|meta| meta.len()))
         .sum();
     if let (Some(limit), Some(used)) = (auth.storage_limit, auth.storage_used) {
         let remaining = limit.saturating_sub(used);
@@ -489,7 +506,7 @@ fn wait_for_remote_push_doc_resend_ready(
 
 fn perform_native_uploads(
     app: &tauri::AppHandle,
-    files: &[PathBuf],
+    files: &[UploadItem],
 ) -> Result<UploadExecutionSummary, String> {
     set_upload_progress_label(app, "上传进度: 校验会话...");
     let client = create_client(600)?;
@@ -509,7 +526,7 @@ fn perform_native_uploads(
     for (index, file) in files.iter().enumerate() {
         let seq = index + 1;
         set_upload_progress_label(app, &format!("上传进度: {seq}/{total} 准备中"));
-        let prepared = match prepare_upload_file(file) {
+        let prepared = match prepare_upload_item(file) {
             Ok(value) => value,
             Err(err) => {
                 failed += 1;
@@ -773,6 +790,21 @@ fn finalize_upload_result(
 pub fn upload_files_blocking_with_active_task(
     app: &tauri::AppHandle,
     files: Vec<PathBuf>,
+    show_dialog: bool,
+) -> Result<crate::models::DashboardSnapshot, String> {
+    let items = files
+        .into_iter()
+        .map(|path| UploadItem {
+            path,
+            display_name: None,
+        })
+        .collect::<Vec<_>>();
+    upload_items_blocking_with_active_task(app, items, show_dialog)
+}
+
+pub fn upload_items_blocking_with_active_task(
+    app: &tauri::AppHandle,
+    files: Vec<UploadItem>,
     show_dialog: bool,
 ) -> Result<crate::models::DashboardSnapshot, String> {
     let result = perform_native_uploads(app, &files);

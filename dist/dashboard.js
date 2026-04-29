@@ -74,6 +74,12 @@ const VIEW_META = {
     title: "Zotero 附件工作流",
     subtitle: "查看最近文献附件、按需推送，并在缺失本地文件时走 WebDAV 拉取链路。",
     badge: "Zotero"
+  },
+  calibre: {
+    kicker: "Calibre",
+    title: "Calibre 书库工作流",
+    subtitle: "直接读取 metadata.db，展示最近书籍并按数据库标题推送到 BOOX。",
+    badge: "Calibre"
   }
 };
 
@@ -84,6 +90,12 @@ function createZoteroForm() {
     webdavUrl: "",
     webdavUsername: "",
     webdavPassword: ""
+  };
+}
+
+function createCalibreForm() {
+  return {
+    libraryDirsText: ""
   };
 }
 
@@ -109,6 +121,20 @@ const state = {
     phaseError: "",
     form: createZoteroForm(),
     detected: null,
+    filterText: ""
+  },
+  calibre: {
+    status: null,
+    books: [],
+    loadingStatus: false,
+    loadingBooks: false,
+    pushingFormatKey: null,
+    showBrokenOnly: false,
+    scrollTop: 0,
+    activeBookKey: "",
+    phase: "idle",
+    phaseError: "",
+    form: createCalibreForm(),
     filterText: ""
   }
 };
@@ -399,6 +425,174 @@ function buildZoteroConnectionCard(options = {}) {
   `;
 }
 
+function calibreStateText(raw) {
+  if (raw === "connected") return "已连接";
+  if (raw === "pending") return "待补全";
+  if (raw === "failed") return "失败";
+  if (raw === "detecting") return "检测中";
+  if (raw === "validating") return "保存中";
+  return "未检测";
+}
+
+function calibreMissingFieldText(key) {
+  if (key === "library_dirs") return "缺少书库目录";
+  if (key === "database_path") return "未找到 metadata.db";
+  return key || "-";
+}
+
+function formatCalibreStateNote(status) {
+  if (!status) return "尚未检测 Calibre 书库。";
+  if (state.calibre.phase === "detecting") return "正在检测默认 Calibre 书库目录。";
+  if (state.calibre.phase === "validating") return "正在保存并校验 Calibre 书库目录。";
+  if (state.calibre.phaseError) return state.calibre.phaseError;
+  const missing = Array.isArray(status.missing_fields) ? status.missing_fields : [];
+  if (missing.length > 0) {
+    if (Number(status?.summary?.ready_library_count || 0) > 0) {
+      return `部分书库可用: 已就绪 ${Number(status?.summary?.ready_library_count || 0)} 个，待修复 ${missing.map(calibreMissingFieldText).join("，")}`;
+    }
+    return `待补全: ${missing.map(calibreMissingFieldText).join("，")}`;
+  }
+  if (status.last_error) return status.last_error;
+  if (status.state === "connected") {
+    return "Calibre 书库已就绪，推送时会优先使用 metadata.db 里的书名，而不是拼音文件名。";
+  }
+  return "可以先自动检测，找不到时再手动选择书库目录。";
+}
+
+function syncCalibreFormFromStatus(status) {
+  const summary = status?.summary || {};
+  state.calibre.form = {
+    libraryDirsText: Array.isArray(summary.library_dirs) ? summary.library_dirs.join("\n") : ""
+  };
+}
+
+function parseCalibreLibraryDirs(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function buildCalibreStatusChips(status) {
+  const summary = status?.summary || {};
+  const phaseState = state.calibre.phase === "detecting"
+    ? "detecting"
+    : state.calibre.phase === "validating"
+      ? "validating"
+      : status?.state;
+  const chips = [
+    `状态: ${calibreStateText(phaseState)}`,
+    `书库: ${Number(summary.total_library_count || 0)} 个`,
+    `数据库: ${Number(summary.ready_library_count || 0)}/${Number(summary.total_library_count || 0)} 已就绪`
+  ];
+  return chips
+    .map((text) => `<span class="status-chip pending zotero-chip">${escapeHtml(text)}</span>`)
+    .join("");
+}
+
+function buildCalibreConfiguredLibraryList(status) {
+  const summary = status?.summary || {};
+  const dirs = Array.isArray(summary.library_dirs) ? summary.library_dirs : [];
+  const dbs = Array.isArray(summary.database_paths) ? summary.database_paths : [];
+  const readyDirs = new Set(Array.isArray(summary.ready_library_dirs) ? summary.ready_library_dirs : []);
+  if (dirs.length === 0) return "";
+  const rows = dirs
+    .map((dir, index) => {
+      const dbPath = dbs[index] || "";
+      const ready = readyDirs.has(dir);
+      return { dir, dbPath, ready };
+    })
+    .filter((row) => !state.calibre.showBrokenOnly || !row.ready);
+  return `
+    <div class="calibre-library-list">
+      ${rows.length > 0 ? rows.map((row) => {
+        return `
+          <div class="calibre-library-row ${row.ready ? "is-ready" : "is-broken"}">
+            <div class="calibre-library-main">
+              <p class="push-name">${escapeHtml(row.dir)}</p>
+              <p class="push-meta">${escapeHtml(row.ready ? (row.dbPath || "metadata.db 已就绪") : "未找到 metadata.db")}</p>
+            </div>
+            <div class="row-actions">
+              <span class="zotero-count-pill ${row.ready ? "is-ready" : ""}">${escapeHtml(row.ready ? "已就绪" : "待修复")}</span>
+              <button
+                class="button button-tertiary button-xs"
+                data-action="calibre-remove-library"
+                data-library-dir="${escapeHtml(row.dir)}"
+                type="button"
+                ${state.calibre.phase === "validating" ? "disabled" : ""}
+              >移除</button>
+            </div>
+          </div>
+        `;
+      }).join("") : `
+        <div class="calibre-library-empty">
+          <p class="inline-note">当前没有异常书库，所有已配置目录都已就绪。</p>
+        </div>
+      `}
+    </div>
+  `;
+}
+
+function buildCalibreConnectionCard(options = {}) {
+  const embedded = options.embedded === true;
+  const status = state.calibre.status;
+  const form = state.calibre.form;
+  const note = formatCalibreStateNote(status);
+  const readyCount = Number(status?.summary?.ready_library_count || 0);
+  const totalCount = Number(status?.summary?.total_library_count || 0);
+  const brokenCount = Math.max(0, totalCount - readyCount);
+  const connected = readyCount > 0;
+
+  return `
+    <section class="panel-card soft zotero-connection-card">
+      <div class="panel-header">
+        <div>
+          <h3>Calibre 书库连接</h3>
+          <p>${embedded ? "读取本地 metadata.db 并用数据库标题发起推送，避免中文书名被拼音文件名替代。" : "连接书库后，可直接浏览最近书籍和可推送格式。"}</p>
+        </div>
+        <div class="section-actions">
+          <button class="button button-tertiary button-xs" data-action="calibre-detect" type="button" ${state.calibre.loadingStatus ? "disabled" : ""}>自动检测</button>
+          <button class="button button-tertiary button-xs" data-action="calibre-refresh-libraries" type="button" ${state.calibre.loadingStatus ? "disabled" : ""}>检查全部</button>
+          <button class="button button-tertiary button-xs" data-action="calibre-pick-library" type="button">选择目录</button>
+        </div>
+      </div>
+      <div class="zotero-panel-body">
+        <p class="zotero-note">${escapeHtml(note)}</p>
+        <div class="zotero-status-strip">${buildCalibreStatusChips(status)}</div>
+        <div class="zotero-form">
+          <label class="zotero-field">
+            <span class="zotero-field-head">
+              <span>书库目录列表</span>
+              <span class="zotero-field-meta">${escapeHtml(totalCount > 0 ? `已配置 ${totalCount} 个，已就绪 ${readyCount} 个` : "一行一个目录，需包含 metadata.db")}</span>
+            </span>
+            <textarea
+              data-calibre-field="libraryDirsText"
+              class="zotero-textarea"
+              rows="4"
+              placeholder="例如 /Users/you/Calibre Library&#10;/Volumes/SSD/Books/Calibre Library"
+            >${escapeHtml(form.libraryDirsText || "")}</textarea>
+          </label>
+          ${totalCount > 0 ? `
+            <div class="section-actions">
+              <button
+                class="button ${state.calibre.showBrokenOnly ? "button-secondary" : "button-tertiary"} button-xs"
+                data-action="calibre-toggle-broken-only"
+                type="button"
+              >${escapeHtml(state.calibre.showBrokenOnly ? `显示全部 (${totalCount})` : `只看异常书库 (${brokenCount})`)}</button>
+            </div>
+          ` : ""}
+          ${buildCalibreConfiguredLibraryList(status)}
+          <div class="section-actions">
+            <button class="button button-tertiary" data-action="calibre-pick-library" type="button">追加目录</button>
+            <button class="button button-primary" data-action="calibre-save" type="button" ${state.calibre.phase === "validating" ? "disabled" : ""}>保存</button>
+            ${connected ? `<button class="button button-secondary" data-view-target="calibre" type="button">打开书库工作流</button>` : ""}
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function buildZoteroAttachmentActions(attachment) {
   if (Number(attachment.link_mode) !== 0) {
     return `<button class="button button-tertiary button-xs" type="button" disabled>暂不支持</button>`;
@@ -550,6 +744,130 @@ function buildZoteroWorkflowItems(items) {
     .join("");
 }
 
+function calibreSearchText(book) {
+  const formats = Array.isArray(book?.formats) ? book.formats : [];
+  return [
+    book?.title,
+    book?.author_summary,
+    book?.published_year,
+    book?.library_label,
+    book?.library_dir,
+    book?.date_modified,
+    ...formats.flatMap((format) => [
+      format?.format,
+      format?.file_name,
+      format?.status_label
+    ])
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function getCalibreBooksWithFormats(books) {
+  const list = Array.isArray(books) ? books : [];
+  return list.filter((book) => Array.isArray(book?.formats) && book.formats.length > 0);
+}
+
+function getFilteredCalibreBooks(books, filterText) {
+  const list = getCalibreBooksWithFormats(books);
+  const needle = String(filterText || "").trim().toLowerCase();
+  if (!needle) return list;
+  return list.filter((book) => calibreSearchText(book).includes(needle));
+}
+
+function buildCalibreWorkflowStats(books) {
+  const list = getCalibreBooksWithFormats(books);
+  const libraryCount = new Set(list.map((book) => String(book.library_dir || ""))).size;
+  const formatCount = list.reduce((sum, book) => sum + (Array.isArray(book.formats) ? book.formats.length : 0), 0);
+  const pushableCount = list.reduce(
+    (sum, book) =>
+      sum + (Array.isArray(book.formats) ? book.formats.filter((format) => format.can_push_directly).length : 0),
+    0
+  );
+  return `
+    <div class="zotero-workflow-stats">
+      <span class="zotero-count-pill">${escapeHtml(`${libraryCount} 个书库`)}</span>
+      <span class="zotero-count-pill">${escapeHtml(`${list.length} 本书`)}</span>
+      <span class="zotero-count-pill">${escapeHtml(`${formatCount} 个格式`)}</span>
+      <span class="zotero-count-pill is-ready">${escapeHtml(`可推送 ${pushableCount}`)}</span>
+    </div>
+  `;
+}
+
+function buildCalibreFormatActions(format) {
+  const formatKey = `${String(format.library_dir || "")}::${String(format.data_id || "")}`;
+  const busy = String(state.calibre.pushingFormatKey || "") === formatKey;
+  return `
+    <button
+      class="button button-primary button-xs"
+      data-action="calibre-push-format"
+      data-library-dir="${escapeHtml(String(format.library_dir || ""))}"
+      data-data-id="${escapeHtml(String(format.data_id || ""))}"
+      type="button"
+      ${format.can_push_directly && !busy ? "" : "disabled"}
+    >${escapeHtml(busy ? "推送中..." : "推送")}</button>
+  `;
+}
+
+function buildCalibreWorkflowBooks(books) {
+  if (!Array.isArray(books) || books.length === 0) {
+    return `
+      <div class="empty-card compact">
+        <h3>暂无可展示的书籍</h3>
+        <p class="empty-copy">连接完成后，这里会展示最近 50 本带格式文件的 Calibre 书籍。</p>
+      </div>
+    `;
+  }
+  return books
+    .map((book) => {
+      const bookKey = buildCalibreBookKey(book);
+      const formats = Array.isArray(book.formats) ? book.formats : [];
+      const readyCount = formats.filter((format) => format.can_push_directly).length;
+      const formatHtml = formats
+        .map(
+          (format) => `
+            <div class="zotero-attachment-row">
+              <div class="zotero-attachment-main">
+                <p class="push-name">${escapeHtml(format.file_name || `${book.title || "未命名书籍"}.${String(format.format || "").toLowerCase()}`)}</p>
+                <p class="push-meta">${escapeHtml([
+                  format.format || "未知格式",
+                  format.file_size ? bytesToText(format.file_size) : null,
+                  format.status_label || "-"
+                ].filter(Boolean).join(" · "))}</p>
+                <p class="inline-note">${escapeHtml(format.local_exists ? "将直接读取本地书籍文件，并把 BOOX 侧标题改成 metadata.db 中的书名。" : "未找到本地文件，请先确认 Calibre 书库完整同步。")}</p>
+              </div>
+              <div class="row-actions">
+                ${buildCalibreFormatActions(format)}
+              </div>
+            </div>
+          `
+        )
+        .join("");
+      return `
+        <article
+          class="list-item zotero-item-card ${state.calibre.activeBookKey === bookKey ? "is-active" : ""}"
+          data-calibre-book-key="${escapeHtml(bookKey)}"
+        >
+          <div class="zotero-item-card-head">
+            <div class="list-item-main zotero-item-card-main">
+              <p class="list-title">${escapeHtml(book.title || "未命名书籍")}</p>
+              <p class="list-meta">${escapeHtml([book.author_summary, book.published_year, book.library_label, book.date_modified].filter(Boolean).join(" · ") || "最近修改书籍")}</p>
+            </div>
+            <div class="zotero-item-card-side">
+              <span class="zotero-count-pill">${escapeHtml(`${formats.length} 个格式`)}</span>
+              <span class="zotero-count-pill ${readyCount > 0 ? "is-ready" : ""}">${escapeHtml(`可推送 ${readyCount}`)}</span>
+            </div>
+          </div>
+          <div class="zotero-item-card-body">
+            ${formatHtml}
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
 function safeNum(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -641,6 +959,78 @@ function getSavedView() {
   return "overview";
 }
 
+function getInitialCalibreShowBrokenOnly() {
+  return localStorage.getItem("s2b_calibre_show_broken_only") === "1";
+}
+
+function setCalibreShowBrokenOnly(value) {
+  state.calibre.showBrokenOnly = !!value;
+  localStorage.setItem("s2b_calibre_show_broken_only", state.calibre.showBrokenOnly ? "1" : "0");
+}
+
+function getInitialCalibreFilterText() {
+  return localStorage.getItem("s2b_calibre_filter_text") || "";
+}
+
+function setCalibreFilterText(value) {
+  state.calibre.filterText = String(value || "");
+  localStorage.setItem("s2b_calibre_filter_text", state.calibre.filterText);
+}
+
+function getInitialCalibreScrollTop() {
+  const value = Number(localStorage.getItem("s2b_calibre_scroll_top"));
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function setCalibreScrollTop(value) {
+  const next = Math.max(0, Number(value) || 0);
+  state.calibre.scrollTop = next;
+  localStorage.setItem("s2b_calibre_scroll_top", String(next));
+}
+
+function buildCalibreBookKey(book) {
+  return `${String(book?.library_dir || "")}::${String(book?.book_id || "")}`;
+}
+
+function getInitialCalibreActiveBookKey() {
+  return localStorage.getItem("s2b_calibre_active_book_key") || "";
+}
+
+function setCalibreActiveBookKey(value) {
+  state.calibre.activeBookKey = String(value || "");
+  localStorage.setItem("s2b_calibre_active_book_key", state.calibre.activeBookKey);
+}
+
+function getCalibreScrollContainer() {
+  return document.querySelector('[data-calibre-scroll-container="true"]');
+}
+
+function getCalibreActiveBookElement() {
+  if (!state.calibre.activeBookKey) return null;
+  return document.querySelector(`[data-calibre-book-key="${CSS.escape(state.calibre.activeBookKey)}"]`);
+}
+
+function saveCalibreScrollPositionFromDom() {
+  const container = getCalibreScrollContainer();
+  if (container instanceof HTMLElement) {
+    setCalibreScrollTop(container.scrollTop);
+  }
+}
+
+function restoreCalibreScrollPosition() {
+  const targetTop = Math.max(0, Number(state.calibre.scrollTop || 0));
+  requestAnimationFrame(() => {
+    const container = getCalibreScrollContainer();
+    if (container instanceof HTMLElement) {
+      container.scrollTop = targetTop;
+    }
+    const activeBook = getCalibreActiveBookElement();
+    if (activeBook instanceof HTMLElement) {
+      activeBook.scrollIntoView({ block: "nearest" });
+    }
+  });
+}
+
 function setActiveView(view, options = {}) {
   if (!VIEW_META[view]) return;
   state.activeView = view;
@@ -681,6 +1071,8 @@ function renderToolbar() {
       badge = `${computeTodayReadCount(snapshot?.calendar_metrics?.day_read_today || {})} 今日`;
     } else if (state.activeView === "zotero") {
       badge = zoteroStateText(state.zotero.status?.state);
+    } else if (state.activeView === "calibre") {
+      badge = calibreStateText(state.calibre.status?.state);
     } else if (state.activeView === "overview") {
       badge = snapshot?.auth?.authorized ? "Live" : "Preview";
     }
@@ -975,6 +1367,7 @@ function renderOverview(snapshot) {
           </section>
 
           ${buildZoteroConnectionCard({ embedded: true })}
+          ${buildCalibreConnectionCard({ embedded: true })}
         </div>
       </div>
     </section>
@@ -1301,11 +1694,82 @@ function renderZoteroView() {
   `;
 }
 
+function renderCalibreView() {
+  const status = state.calibre.status;
+  const note = formatCalibreStateNote(status);
+  const connected = Number(status?.summary?.ready_library_count || 0) > 0;
+  const allBooks = Array.isArray(state.calibre.books) ? state.calibre.books : [];
+  const filteredBooks = getFilteredCalibreBooks(allBooks, state.calibre.filterText);
+
+  return `
+    <section class="view zotero-view">
+      <div class="zotero-grid">
+        <section class="panel-card soft zotero-panel-card zotero-workflow-card">
+          <div class="panel-header">
+            <div>
+              <h3>书籍工作流</h3>
+              <p>按最近修改时间展示书籍与格式，推送时优先使用数据库标题。</p>
+            </div>
+            <div class="section-actions">
+              <button class="button button-tertiary button-xs" data-action="calibre-refresh-books" type="button" ${connected ? "" : "disabled"} ${state.calibre.loadingBooks ? "disabled" : ""}>刷新列表</button>
+            </div>
+          </div>
+          <div class="zotero-panel-body" data-calibre-scroll-container="true">
+            <p class="zotero-note">${escapeHtml(note)}</p>
+            <div class="zotero-status-strip">${buildCalibreStatusChips(status)}</div>
+            ${connected ? `
+              <div class="zotero-workflow-toolbar">
+                <div class="zotero-workflow-toolbar-main">
+                  ${buildCalibreWorkflowStats(allBooks)}
+                  <p class="inline-note">这里直接读取 Calibre 的 metadata.db。即使库目录和文件名是拼音，推送名称也会改成数据库里的原始书名。</p>
+                </div>
+                <label class="zotero-search-field">
+                  <span>筛选书籍或格式</span>
+                  <input
+                    data-calibre-search="books"
+                    type="search"
+                    value="${escapeHtml(state.calibre.filterText || "")}"
+                    placeholder="搜索标题、作者、年份、格式"
+                  />
+                </label>
+              </div>
+              <div class="zotero-workflow-list">
+                ${state.calibre.loadingBooks && allBooks.length === 0 ? `
+                  <div class="empty-card compact">
+                    <h3>正在刷新 Calibre 书籍</h3>
+                    <p class="empty-copy">本地书库读取完成后，这里会更新最近书籍与格式状态。</p>
+                  </div>
+                ` : filteredBooks.length > 0 ? buildCalibreWorkflowBooks(filteredBooks) : `
+                  <div class="empty-card compact">
+                    <h3>没有匹配的书籍</h3>
+                    <p class="empty-copy">试试其他关键词，或清空筛选后查看最近书籍。</p>
+                  </div>
+                `}
+              </div>
+            ` : `
+              <div class="empty-card compact">
+                <h3>等待连接完成</h3>
+                <p class="empty-copy">请先在概览页完成 Calibre 书库目录配置。</p>
+                <div class="section-actions">
+                  <button class="button button-secondary" data-view-target="overview" type="button">前往概览配置</button>
+                </div>
+              </div>
+            `}
+          </div>
+        </section>
+      </div>
+    </section>
+  `;
+}
+
 function renderCurrentView() {
   const root = contentRoot();
   if (!root) return;
+  if (state.activeView === "calibre") {
+    saveCalibreScrollPositionFromDom();
+  }
   const snapshot = state.snapshot;
-  if (!snapshot && state.activeView !== "zotero") {
+  if (!snapshot && state.activeView !== "zotero" && state.activeView !== "calibre") {
     root.innerHTML = `
       <section class="view">
         <div class="empty-card">
@@ -1326,10 +1790,15 @@ function renderCurrentView() {
     html = renderReadingView(snapshot);
   } else if (state.activeView === "zotero") {
     html = renderZoteroView();
+  } else if (state.activeView === "calibre") {
+    html = renderCalibreView();
   } else {
     html = renderOverview(snapshot);
   }
   root.innerHTML = html;
+  if (state.activeView === "calibre") {
+    restoreCalibreScrollPosition();
+  }
 }
 
 function renderSnapshot(snapshot) {
@@ -1663,6 +2132,213 @@ async function pushZoteroAttachment(attachmentId) {
   }
 }
 
+async function loadCalibreStatus(forceBooks = false) {
+  state.calibre.loadingStatus = true;
+  renderToolbar();
+  renderCurrentView();
+  try {
+    const status = await invokeWithTimeout("calibre_status", {}, 10000);
+    state.calibre.status = status;
+    syncCalibreFormFromStatus(status);
+    if (Number(status?.summary?.ready_library_count || 0) === 0) {
+      state.calibre.books = [];
+    }
+    if (forceBooks && Number(status?.summary?.ready_library_count || 0) > 0 && !state.calibre.loadingBooks) {
+      await loadCalibreBooks();
+    }
+  } finally {
+    state.calibre.loadingStatus = false;
+    renderToolbar();
+    renderCurrentView();
+  }
+}
+
+async function loadCalibreBooks() {
+  state.calibre.loadingBooks = true;
+  renderCurrentView();
+  try {
+    state.calibre.books = await invokeWithTimeout("calibre_list_recent_books", { limit: 50 }, 15000);
+  } catch (err) {
+    state.calibre.phaseError = `加载 Calibre 书籍失败: ${String(err)}`;
+  } finally {
+    state.calibre.loadingBooks = false;
+    renderCurrentView();
+  }
+}
+
+async function ensureCalibreData() {
+  if (!state.calibre.status) {
+    await loadCalibreStatus();
+    return;
+  }
+  if (
+    (state.calibre.status?.state === "connected" || Number(state.calibre.status?.summary?.ready_library_count || 0) > 0) &&
+    state.calibre.books.length === 0 &&
+    !state.calibre.loadingBooks
+  ) {
+    await loadCalibreBooks();
+    return;
+  }
+  renderToolbar();
+  renderCurrentView();
+}
+
+async function detectCalibreLibrary() {
+  state.calibre.phase = "detecting";
+  state.calibre.phaseError = "";
+  renderToolbar();
+  renderCurrentView();
+  try {
+    const status = await invokeWithTimeout("calibre_detect_library", {}, 12000);
+    state.calibre.status = status;
+    syncCalibreFormFromStatus(status);
+    state.calibre.phaseError = Number(status?.summary?.ready_library_count || 0) > 0
+      ? "已检测到默认 Calibre 书库。"
+      : formatCalibreStateNote(status);
+    if (Number(status?.summary?.ready_library_count || 0) > 0) {
+      await loadCalibreBooks();
+    } else {
+      state.calibre.books = [];
+    }
+  } catch (err) {
+    state.calibre.phaseError = `自动检测失败: ${String(err)}`;
+  } finally {
+    state.calibre.phase = "idle";
+    renderToolbar();
+    renderCurrentView();
+  }
+}
+
+async function refreshCalibreLibraries() {
+  state.calibre.loadingStatus = true;
+  state.calibre.phaseError = "";
+  renderToolbar();
+  renderCurrentView();
+  try {
+    const status = await invokeWithTimeout("calibre_refresh_libraries", {}, 12000);
+    state.calibre.status = status;
+    syncCalibreFormFromStatus(status);
+    if (Number(status?.summary?.ready_library_count || 0) > 0) {
+      await loadCalibreBooks();
+      state.calibre.phaseError = status?.last_error || "书库检查完成。";
+    } else {
+      state.calibre.books = [];
+      state.calibre.phaseError = status?.last_error || formatCalibreStateNote(status);
+    }
+  } catch (err) {
+    state.calibre.phaseError = `检查失败: ${String(err)}`;
+  } finally {
+    state.calibre.loadingStatus = false;
+    renderToolbar();
+    renderCurrentView();
+  }
+}
+
+async function pickCalibreLibraryDirectory() {
+  state.calibre.phaseError = "";
+  renderCurrentView();
+  try {
+    const status = await invokeWithTimeout("calibre_pick_library_dir", {}, 30000);
+    state.calibre.status = status;
+    syncCalibreFormFromStatus(status);
+    if (Number(status?.summary?.ready_library_count || 0) > 0) {
+      await loadCalibreBooks();
+    } else {
+      state.calibre.books = [];
+      renderCurrentView();
+    }
+  } catch (err) {
+    state.calibre.phaseError = String(err);
+    renderCurrentView();
+  }
+}
+
+async function saveCalibreConfig() {
+  state.calibre.phase = "validating";
+  state.calibre.phaseError = "";
+  setUploadStatusOverride("上传进度: 正在保存 Calibre 书库配置...", 8000);
+  renderToolbar();
+  renderCurrentView();
+  try {
+    const libraryDirs = parseCalibreLibraryDirs(state.calibre.form.libraryDirsText);
+    const status = await invokeWithTimeout(
+      "calibre_save_library_dir",
+      {
+        input: {
+          library_dirs: libraryDirs
+        }
+      },
+      15000
+    );
+    state.calibre.status = status;
+    syncCalibreFormFromStatus(status);
+    if (Number(status?.summary?.ready_library_count || 0) > 0) {
+      state.calibre.phaseError = "Calibre 书库已连接。";
+      setUploadStatusOverride("上传进度: Calibre 书库配置完成", 4000);
+      await loadCalibreBooks();
+    } else {
+      state.calibre.books = [];
+      state.calibre.phaseError = formatCalibreStateNote(status);
+    }
+  } catch (err) {
+    state.calibre.phaseError = `保存失败: ${String(err)}`;
+  } finally {
+    state.calibre.phase = "idle";
+    renderToolbar();
+    renderCurrentView();
+  }
+}
+
+async function removeCalibreLibraryDirectory(libraryDir) {
+  const target = String(libraryDir || "").trim();
+  if (!target) return;
+  const ok = window.confirm(`确定移除这个 Calibre 书库目录吗？\n\n${target}`);
+  if (!ok) return;
+  const nextDirs = parseCalibreLibraryDirs(state.calibre.form.libraryDirsText).filter((dir) => dir !== target);
+  state.calibre.form.libraryDirsText = nextDirs.join("\n");
+  await saveCalibreConfig();
+}
+
+async function pushCalibreFormat(libraryDir, dataId) {
+  const formatKey = `${String(libraryDir || "")}::${String(dataId || "")}`;
+  state.calibre.pushingFormatKey = formatKey;
+  state.calibre.phaseError = "";
+  setUploadStatusOverride("上传进度: 正在提交 Calibre 书籍推送...", 10000);
+  renderCurrentView();
+  try {
+    const snapshot = await invokeWithTimeout(
+      "calibre_push_format",
+      { libraryDir: String(libraryDir || ""), dataId: Number(dataId) },
+      120000
+    );
+    if (snapshot) renderSnapshot(snapshot);
+    await loadCalibreBooks();
+    setUploadStatusOverride("上传进度: Calibre 书籍推送完成", 5000);
+  } catch (err) {
+    state.calibre.phaseError = `推送失败: ${String(err)}`;
+    $("sidebar-upload-status").textContent = `推送失败: ${String(err)}`;
+    renderCurrentView();
+  } finally {
+    state.calibre.pushingFormatKey = null;
+    renderCurrentView();
+  }
+}
+
+async function bootstrapCalibreAutoDetect() {
+  try {
+    await loadCalibreStatus();
+    const summary = state.calibre.status?.summary || {};
+    if (!Number(summary.total_library_count || 0) && !Number(summary.ready_library_count || 0)) {
+      await detectCalibreLibrary();
+    }
+  } catch (err) {
+    state.calibre.phaseError = `启动时检测 Calibre 失败: ${String(err)}`;
+    if (state.activeView === "calibre") {
+      renderCurrentView();
+    }
+  }
+}
+
 function bindActions() {
   document.addEventListener("click", async (event) => {
     const navButton = event.target?.closest(".nav-item[data-view]");
@@ -1670,6 +2346,8 @@ function bindActions() {
       setActiveView(navButton.dataset.view || "overview");
       if ((navButton.dataset.view || "overview") === "zotero") {
         await ensureZoteroData();
+      } else if ((navButton.dataset.view || "overview") === "calibre") {
+        await ensureCalibreData();
       }
       return;
     }
@@ -1677,7 +2355,25 @@ function bindActions() {
     const goViewButton = event.target?.closest("[data-view-target]");
     if (goViewButton instanceof HTMLButtonElement) {
       setActiveView(goViewButton.dataset.viewTarget || "overview");
+      if ((goViewButton.dataset.viewTarget || "overview") === "zotero") {
+        await ensureZoteroData();
+      } else if ((goViewButton.dataset.viewTarget || "overview") === "calibre") {
+        await ensureCalibreData();
+      }
       return;
+    }
+
+    const calibreBook = event.target?.closest("[data-calibre-book-key]");
+    if (calibreBook instanceof HTMLElement) {
+      const nextBookKey = calibreBook.dataset.calibreBookKey || "";
+      const changed = state.calibre.activeBookKey !== nextBookKey;
+      setCalibreActiveBookKey(nextBookKey);
+      if (changed) {
+        document
+          .querySelectorAll("[data-calibre-book-key].is-active")
+          .forEach((element) => element.classList.remove("is-active"));
+        calibreBook.classList.add("is-active");
+      }
     }
 
     const actionButton = event.target?.closest("[data-action]");
@@ -1771,13 +2467,46 @@ function bindActions() {
         await pushZoteroAttachment(actionButton.dataset.attachmentId || "");
         return;
       }
+      if (action === "calibre-detect") {
+        await detectCalibreLibrary();
+        return;
+      }
+      if (action === "calibre-refresh-libraries") {
+        await refreshCalibreLibraries();
+        return;
+      }
+      if (action === "calibre-toggle-broken-only") {
+        setCalibreShowBrokenOnly(!state.calibre.showBrokenOnly);
+        renderCurrentView();
+        return;
+      }
+      if (action === "calibre-pick-library") {
+        await pickCalibreLibraryDirectory();
+        return;
+      }
+      if (action === "calibre-save") {
+        await saveCalibreConfig();
+        return;
+      }
+      if (action === "calibre-remove-library") {
+        await removeCalibreLibraryDirectory(actionButton.dataset.libraryDir || "");
+        return;
+      }
+      if (action === "calibre-refresh-books") {
+        await loadCalibreBooks();
+        return;
+      }
+      if (action === "calibre-push-format") {
+        await pushCalibreFormat(actionButton.dataset.libraryDir || "", actionButton.dataset.dataId || "");
+        return;
+      }
     }
   });
 
   document.addEventListener("input", (event) => {
     const input = event.target;
-    if (!(input instanceof HTMLInputElement)) return;
-    const zoteroSearch = input.dataset.zoteroSearch;
+    if (!(input instanceof HTMLInputElement) && !(input instanceof HTMLTextAreaElement)) return;
+    const zoteroSearch = input instanceof HTMLInputElement ? input.dataset.zoteroSearch : "";
     if (zoteroSearch === "items") {
       const selectionStart = input.selectionStart;
       const selectionEnd = input.selectionEnd;
@@ -1792,10 +2521,39 @@ function bindActions() {
       }
       return;
     }
+    const calibreSearch = input instanceof HTMLInputElement ? input.dataset.calibreSearch : "";
+    if (calibreSearch === "books") {
+      const selectionStart = input.selectionStart;
+      const selectionEnd = input.selectionEnd;
+      setCalibreFilterText(input.value);
+      renderCurrentView();
+      const nextInput = document.querySelector('input[data-calibre-search="books"]');
+      if (nextInput instanceof HTMLInputElement) {
+        nextInput.focus();
+        if (Number.isInteger(selectionStart) && Number.isInteger(selectionEnd)) {
+          nextInput.setSelectionRange(selectionStart, selectionEnd);
+        }
+      }
+      return;
+    }
     const field = input.dataset.zoteroField;
-    if (!field) return;
-    state.zotero.form[field] = input.value;
+    if (field) {
+      state.zotero.form[field] = input.value;
+      return;
+    }
+    const calibreField = input.dataset.calibreField;
+    if (calibreField) {
+      state.calibre.form[calibreField] = input.value;
+    }
   });
+
+  document.addEventListener("scroll", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (target.dataset.calibreScrollContainer === "true") {
+      setCalibreScrollTop(target.scrollTop);
+    }
+  }, true);
 
   $("sidebar-login-btn")?.addEventListener("click", beginLoginAuthorization);
   $("sidebar-upload-btn")?.addEventListener("click", async () => {
@@ -1840,6 +2598,10 @@ function startAutoRefresh() {
 
 document.addEventListener("DOMContentLoaded", () => {
   state.activeView = getSavedView();
+  setCalibreShowBrokenOnly(getInitialCalibreShowBrokenOnly());
+  setCalibreFilterText(getInitialCalibreFilterText());
+  setCalibreScrollTop(getInitialCalibreScrollTop());
+  setCalibreActiveBookKey(getInitialCalibreActiveBookKey());
   syncNavState();
   renderToolbar();
   renderCurrentView();
@@ -1847,13 +2609,18 @@ document.addEventListener("DOMContentLoaded", () => {
   bindActions();
   setTimeout(() => loadSnapshot(true), 120);
   setTimeout(() => bootstrapZoteroAutoDetect(), 180);
+  setTimeout(() => bootstrapCalibreAutoDetect(), 220);
   if (state.activeView === "zotero") {
     setTimeout(() => ensureZoteroData(), 260);
+  } else if (state.activeView === "calibre") {
+    setTimeout(() => ensureCalibreData(), 260);
   }
   window.addEventListener("focus", () => loadSnapshot(true));
   window.addEventListener("focus", () => {
     if (state.activeView === "zotero") {
       ensureZoteroData();
+    } else if (state.activeView === "calibre") {
+      ensureCalibreData();
     }
   });
   window.addEventListener("beforeunload", () => {

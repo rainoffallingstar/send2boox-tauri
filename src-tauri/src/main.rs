@@ -3,6 +3,7 @@
 mod api;
 mod app;
 mod auth;
+mod calibre;
 mod dashboard;
 mod device;
 mod diagnostics;

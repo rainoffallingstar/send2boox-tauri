@@ -214,6 +214,56 @@ pub struct ZoteroSaveInput {
     pub webdav_password: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CalibreConnectionSummary {
+    pub library_dirs: Vec<String>,
+    pub database_paths: Vec<String>,
+    pub ready_library_dirs: Vec<String>,
+    pub ready_library_count: usize,
+    pub total_library_count: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CalibreConnectionState {
+    pub state: String,
+    pub missing_fields: Vec<String>,
+    pub summary: CalibreConnectionSummary,
+    pub detected_at_ms: Option<u128>,
+    pub validated_at_ms: Option<u128>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CalibreFormatSummary {
+    pub data_id: i64,
+    pub library_dir: String,
+    pub format: String,
+    pub file_name: Option<String>,
+    pub file_path: Option<String>,
+    pub file_size: Option<u64>,
+    pub local_exists: bool,
+    pub can_push_directly: bool,
+    pub status_label: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CalibreBookSummary {
+    pub book_id: i64,
+    pub library_dir: String,
+    pub library_label: String,
+    pub title: String,
+    pub author_summary: Option<String>,
+    pub published_year: Option<String>,
+    pub date_modified: String,
+    pub formats: Vec<CalibreFormatSummary>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CalibreSaveInput {
+    pub library_dir: Option<String>,
+    pub library_dirs: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ShareTransferDevice {
     pub model: Option<String>,
