@@ -738,9 +738,6 @@ pub async fn calibre_save_library_dir(
             dirs.push(single);
         }
         let normalized = normalize_library_dirs(&dirs);
-        if normalized.is_empty() {
-            return Err("请先填写至少一个 Calibre 书库目录".to_string());
-        }
         set_library_dirs_config(&app_for_task, normalized, None)
     })
     .await

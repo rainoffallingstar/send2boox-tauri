@@ -2371,6 +2371,12 @@ async function saveCalibreConfig() {
       if (state.activeView === "calibre") {
         await loadCalibreBooks();
       }
+    } else if (libraryDirs.length === 0) {
+      state.calibre.books = [];
+      state.calibre.hasMore = false;
+      state.calibre.page = 0;
+      state.calibre.phaseError = "已清空 Calibre 书库目录。";
+      setUploadStatusOverride("上传进度: 已移除所有 Calibre 书库目录", 4000);
     } else {
       state.calibre.books = [];
       state.calibre.phaseError = formatCalibreStateNote(status);
