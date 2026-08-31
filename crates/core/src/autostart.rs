@@ -2,7 +2,7 @@ use auto_launch::{AutoLaunch, AutoLaunchBuilder};
 use std::fs;
 
 const AUTOSTART_MARKER: &str = "autostart_initialized";
-const APP_NAME: &str = "send2boox-desktop";
+const APP_NAME: &str = "sandFlos";
 
 pub fn build_auto_launch() -> Result<AutoLaunch, String> {
     if !AutoLaunch::is_support() {

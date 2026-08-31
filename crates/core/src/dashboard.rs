@@ -24,7 +24,7 @@ pub struct AppStatus {
 
 pub fn app_status() -> AppStatus {
     AppStatus {
-        app: "Send2Boox Desktop".to_string(),
+        app: "sandFlos".to_string(),
         version: "0.1.0".to_string(),
         unix_ms: unix_ms_now(),
     }

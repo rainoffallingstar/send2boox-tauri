@@ -67,7 +67,7 @@ pub fn setup_tray() -> Result<(), String> {
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("Send2Boox 控制中心")
+        .with_tooltip("sandFlos 控制中心")
         .with_icon(icon)
         .build()
         .map_err(|e| e.to_string())?;

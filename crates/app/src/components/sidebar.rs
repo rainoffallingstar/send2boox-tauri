@@ -89,12 +89,12 @@ pub fn render_sidebar(state_entity: &Entity<AppState>, cx: &mut App) -> impl Int
                                 .justify_center()
                                 .text_color(rgb(0xffffff))
                                 .font_bold()
-                                .child("B")
+                                .child("S")
                         )
                         .child(
                             v_flex()
                                 .child(
-                                    Label::new("Send2Boox")
+                                    Label::new("sandFlos")
                                         .text_xs()
                                         .text_color(cx.theme().muted_foreground)
                                 )
