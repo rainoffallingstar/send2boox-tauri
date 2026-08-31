@@ -35,6 +35,9 @@ jobs:
       - name: Verify Rust Build
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
+      - name: Check GPUI Workspace
+        run: cargo check --workspace
+
       - name: Build DMG (macOS)
         id: build_dmg
         shell: bash
@@ -94,6 +97,10 @@ jobs:
       - name: Verify Rust Build
         shell: pwsh
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Check GPUI Workspace
+        shell: pwsh
+        run: cargo check --workspace
 
       - name: Build MSI (Windows)
         shell: pwsh
