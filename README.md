@@ -1,70 +1,96 @@
-# Send2Boox Desktop
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="sandFlos — 把书和文档推送到 BOOX 墨水屏设备的 Rust 原生桌面控制中心">
+</p>
 
-Send2Boox 桌面端现已重构为“本地仪表盘唯一主界面 + 托盘入口 + Rust 原生 API 服务层”的架构。
+# sandFlos
 
-## 当前架构
+**sandFlos** 是 100% Rust 编写、GPUI 原生 GPU 渲染的桌面控制中心。它把「上传 → 推送」到 BOOX 墨水屏设备的流程，收敛成一个本地原生应用：登录授权、云空间、设备、阅读指标、互动文件队列、Zotero 与 Calibre 双书库，全部在 Rust 进程中完成，不依赖任何 WebView。
 
-- 主窗口只保留本地仪表盘，不再创建官网主页面 WebView。
-- 托盘左键仍然用于显示/隐藏仪表盘。
-- 关闭主窗口默认隐藏到托盘，不退出进程。
-- 登录授权改为默认浏览器打开本地回环登录页，再回流到桌面端。
-- 仪表盘、上传、推送队列、设备列表、阅读指标全部走 Rust 原生接口。
-- 已移除隐藏 WebView、页面注入 JS、浏览器会话 fetch、PouchDB 本地依赖。
+## 为什么是 sandFlos
 
-## 模块划分
+| | 传统 WebView 方案 | sandFlos |
+| --- | --- | --- |
+| 渲染 | WebView / WebKit 进程 | GPUI 原生 GPU 渲染 |
+| 前端 | HTML / CSS / JS | Rust 直接驱动 UI |
+| 通信 | JSON IPC 序列化 | 同进程直接调用 |
+| 内存占用 | 通常 100MB+ | 约 20–40MB |
+| 冷启动 | 数百毫秒 | 瞬时 |
 
-- `src-tauri/src/app.rs`: 主窗口、托盘、左键唤起、关闭隐藏、自启动。
-- `src-tauri/src/auth.rs`: 默认浏览器登录、本地回环监听、二维码授权回流。
-- `src-tauri/src/api.rs`: 官网网页 API Rust 封装、认证头、neocloud 访问、OSS/STS 支撑。
-- `src-tauri/src/dashboard.rs`: 仪表盘快照聚合与命令入口。
-- `src-tauri/src/push.rs`: 上传、重推、删除、上传进度状态机。
-- `src-tauri/src/device.rs`: 设备列表、局域网识别、互传地址规范化。
-- `src-tauri/src/state.rs`: 登录态、缓存、上传运行态。
+- **无 WebView、无 PouchDB、无隐藏页面注入**：彻底移除旧架构的浏览器桥接层。
+- **登录授权**：默认浏览器打开本地回环登录页，二维码授权后 token 直接回流桌面端。
+- **Rust 直传 OSS**：STS 签名 + 分片进度上报，实时显示速度、剩余时间（ETA）与结果。
 
-## 登录与授权
+## 核心能力
 
-- 点击仪表盘或托盘中的“登录并授权”后，桌面端会启动本地回环端口并用默认浏览器打开登录页。
-- 浏览器页内使用官方二维码登录接口完成授权，成功后把 token 回流给桌面端。
-- 登录完成后自动回到本地仪表盘，不再依赖网页标题、hash、cookie 抓取或隐藏页面桥接。
+- **概览仪表盘**：授权状态、在线设备、今日阅读、互动文件队列，一张快照看全。
+- **互动文件队列**：原生「重推」「删除」，实时上传进度条 + 速度 + ETA。
+- **设备与互传**：局域网设备识别，安全的互传地址打开（仅允许合法局域网地址）。
+- **阅读指标**：今日阅读、本周时长、累计完成，直接聚合云端数据。
+- **Zotero 工作流**：直接读本地 `zotero.sqlite`，附件缺失时走 WebDAV 拉取后推送。
+- **Calibre 工作流**：读取 `metadata.db`，按书籍格式（EPUB / PDF / AZW3 / MOBI）一键推送。
+- **系统托盘**：登录、上传、刷新、开机自启动开关、退出，左键显示/隐藏。
 
-## 仪表盘能力
+<p align="center">
+  <img src="./assets/readme/workflow.svg" width="100%" alt="sandFlos 推送工作流：登录授权 → 选择文件 → Rust 直传 OSS → 推送到 BOOX 设备">
+</p>
 
-- 用户信息、云空间、阅读指标、设备列表、互动文件列表统一从 Rust 聚合快照读取。
-- 上传保留 Rust 直传 OSS/STS 方案，支持进度、速度、ETA 和结果提示。
-- 推送列表支持原生 `重推`、`删除`，不再依赖网页端本地数据库。
-- 设备互传入口只允许合法局域网地址，并通过系统默认浏览器打开。
+## 架构
 
-## 运行与构建
-
-```bash
-cd /Volumes/DataCenter_01/boox-tauri/src-tauri
-cargo run
 ```
+sandFlos
+├── crates/core/          # 纯 Rust 领域逻辑（与 UI 框架解耦）
+│   ├── api.rs            # Send2Boox API / OSS / STS / neocloud
+│   ├── auth.rs           # 本地回环登录与二维码授权回流
+│   ├── push.rs           # OSS 直传状态机与推送队列
+│   ├── device.rs         # 局域网设备发现与互传校验
+│   ├── zotero.rs         # Zotero SQLite + WebDAV 同步
+│   ├── calibre.rs        # Calibre metadata.db 读取与直传
+│   └── dashboard.rs      # 仪表盘快照聚合
+└── crates/app/           # GPUI 原生前端
+    ├── components/       # 侧栏、工具栏等 UI 组件
+    └── views/            # 概览 / 互动文件 / 设备 / 阅读 / Zotero / Calibre
+```
+
+## 快速开始
+
+### 运行（开发）
 
 ```bash
 cd /Volumes/DataCenter_01/boox-tauri
-./scripts/internal_release_check.sh
+cargo build --release -p send2boox-desktop-gpui
+./target/release/send2boox-desktop-gpui
 ```
 
-构建桌面包：
+### 打包 macOS .app
 
 ```bash
-cargo install tauri-cli --version "^1.6"
-cd /Volumes/DataCenter_01/boox-tauri/src-tauri
-cargo tauri build
+cargo build --release -p send2boox-desktop-gpui
+# 将 target/release/send2boox-desktop-gpui 放入 .app/Contents/MacOS/，
+# 并配置 Info.plist 与 Resources 图标后，用 open 打开即可
 ```
 
-## 托盘菜单
+> 项目也保留旧版 `src-tauri`（Tauri）构建目录，但**当前产品形态是 GPUI 原生版**，即 `crates/app`。
 
-- `登录并授权`
-- `上传文件`
-- `刷新仪表盘`
-- `开机自启动: 开/关`
-- `退出`
+## 登录与授权
 
-## 已验证方向
+1. 点击「登录并授权」，桌面端启动本地回环端口并打开默认浏览器。
+2. 在浏览器中完成官方二维码登录。
+3. token 自动回流桌面端，回到本地仪表盘——无需抓取网页标题、hash 或 cookie。
 
-- 仪表盘是唯一主界面。
-- 托盘左键显示/隐藏仍保留。
-- 默认浏览器登录链路可触发本地回流。
-- 仪表盘命令不再依赖官网主页面窗口存在。
+## 测试
+
+```bash
+cd /Volumes/DataCenter_01/boox-tauri
+cargo test --workspace
+```
+
+## 项目结构约定
+
+- 新增业务逻辑优先放入 `crates/core`，与 UI 无关、可独立测试。
+- UI 组件与视图放入 `crates/app`，通过 `Entity<AppState>` 响应式状态驱动。
+- 本地数据（登录态、Zotero / Calibre 配置）默认位于
+  `~/Library/Application Support/com.fallingstar.send2boox/`。
+
+## License
+
+UNLICENSED · © Fallingstar Team
