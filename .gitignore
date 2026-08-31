@@ -29,3 +29,7 @@ node_modules/
 # Misc
 *.tmp
 *.temp
+
+# macOS app bundles (build artifacts)
+*.app
+

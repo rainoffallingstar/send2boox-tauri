@@ -136,8 +136,8 @@ fn main() {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
                 title: Some("Send2Boox 控制中心".into()),
-                appears_transparent: true,
-                traffic_light_position: Some(point(px(16.0), px(16.0))),
+                appears_transparent: false,
+                traffic_light_position: None,
             }),
             ..Default::default()
         };
