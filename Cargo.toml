@@ -3,4 +3,8 @@ members = [
     "crates/core",
     "crates/app",
 ]
+exclude = [
+    "src-tauri",
+    "dist",
+]
 resolver = "2"
